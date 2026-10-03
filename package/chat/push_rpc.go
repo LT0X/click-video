@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,11 +60,25 @@ func (p *GRPCRemotePusher) Push(ctx context.Context, address string, msg Message
 	}
 	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 	defer cancel()
-	ctx = metadata.AppendToOutgoingContext(ctx, chatRPCTokenMetadataKey, p.token)
-	_, err = chatpush.NewChatPushClient(conn).Deliver(ctx, &chatpush.DeliveryRequest{
+	request := &chatpush.DeliveryRequest{
 		EventID: msg.EventID, MessageID: msg.ID, Content: msg.Content, CreateTime: msg.CreateTime,
 		FromUserID: msg.FromUserID, ToUserID: msg.ToUserID,
-	})
+	}
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	nonce, err := newChatRPCNonce()
+	if err != nil {
+		return err
+	}
+	signature, err := chatRPCSignature(p.token, chatpush.ChatPush_Deliver_FullMethodName, timestamp, nonce, request)
+	if err != nil {
+		return err
+	}
+	ctx = metadata.AppendToOutgoingContext(ctx,
+		chatRPCTimestampMetadataKey, timestamp,
+		chatRPCNonceMetadataKey, nonce,
+		chatRPCSignatureMetadataKey, signature,
+	)
+	_, err = chatpush.NewChatPushClient(conn).Deliver(ctx, request)
 	if err != nil {
 		return fmt.Errorf("跨节点推送消息失败: %w", err)
 	}
@@ -108,7 +123,7 @@ func StartPushRPC(address string, registry *Registry, token string) (func(), err
 	if err != nil {
 		return nil, fmt.Errorf("监听聊天节点 RPC 地址 %q 失败: %w", address, err)
 	}
-	server := grpc.NewServer(grpc.UnaryInterceptor(chatRPCAuthUnaryInterceptor(token)))
+	server := grpc.NewServer(grpc.UnaryInterceptor(chatRPCAuthUnaryInterceptor(token, newChatRPCReplayGuard())))
 	chatpush.RegisterChatPushServer(server, NewGatewayPushServer(registry))
 	go func() {
 		if err := server.Serve(listener); err != nil {
