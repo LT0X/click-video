@@ -69,4 +69,5 @@ func InitMQ() {
 	initRelation()
 	initComment()
 	go runCacheInvalidationConsumer(context.Background(), favoriteBroker)
+	go RunQueueDepthMonitor(context.Background(), favoriteBroker, 5*time.Second)
 }

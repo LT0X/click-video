@@ -11,6 +11,7 @@ import (
 
 	"douyin/database"
 	"douyin/model"
+	"douyin/package/metrics"
 	"douyin/rpc/video/video"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -116,6 +117,7 @@ func consumeComments(ctx context.Context, broker *FavoriteEventBroker) error {
 			if !ok {
 				return errors.New("评论消费者通道已关闭")
 			}
+			recordConsumerLag(metrics.Default, commentQueue, delivery.Timestamp, time.Now())
 			discard, err := processCommentPayload(delivery.Body, persistComment)
 			if err != nil {
 				zap.L().Error("处理评论消息失败", zap.Error(err))
