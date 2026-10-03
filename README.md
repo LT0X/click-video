@@ -516,13 +516,14 @@ ContactRpc:            # gRPC 服务发现（etcd）
 | `lock:comment:{videoID}` | String | 分布式锁 |
 | `login_counter:{username}` | String | 登录限流计数 |
 | `chat:route:{userID}` | String | 在线网关地址及连接租约，30 秒过期；前端每 10 秒 ping 续期（DB3） |
+| `chat:rpc:nonce:{target}:{nonce}` | String | 节点推送 HMAC 签名 nonce 的跨实例去重记录，SETNX 写入并保留到签名过期（最长约 60 秒，DB3） |
 | `chat:message:buffer` | Stream | 待落库消息；contact.rpc 批量成功后 ACK 并删除，消费组 `chat-message-writers`（DB3） |
 | `chat:message:dead_letter` | Stream | 无法解析的消息原文和错误原因，人工排查/重放用（DB3） |
 | `chat:history:{minUserID}:{maxUserID}` | ZSet | 会话最近最多 50 条，只有未截断历史才允许缓存命中，1 小时加随机偏移（DB3） |
 | `chat:history:{minUserID}:{maxUserID}:complete` | String | 标记历史 ZSet 完整；与历史缓存同 TTL（DB3） |
 | `chat:message_newest:{userID}:{toUserID}` | ZSet | 单向好友列表的最近消息，10 分钟加随机偏移（DB3） |
 
-聊天 WebSocket 地址为既有 `/douyin/message/ws`，浏览器用 query token 鉴权；`ping` 每 10 秒续期 Redis 路由，服务端 30 秒无心跳关闭连接。普通消息、AI 提问和 AI 回复先写入 Redis Stream，再按 50 条或 250 毫秒批量调用 contact.rpc 写入消息表；contact.rpc 通过 `message.event_id` 唯一索引保证消费重试幂等，只有 DB 写入成功后才确认 Stream。好友关系缓存未命中时也通过 contact.rpc 读取，不跨服务查询关系表。部署升级前执行 `config/mysql/migrations/20261003_chat_message_event_id.sql`。为了让 Redis Stream 能跨进程重启恢复，Redis 必须启用 AOF；本仓库 compose 使用 `appendonly yes` 和 `appendfsync everysec`。多网关部署时，每个实例的 `chat.advertiseAddress` 必须唯一且可从其他实例访问，`chat.rpcListenAddress` 是本机监听地址；默认 `127.0.0.1:8014` 仅适用于单机开发。节点 gRPC 推送用 `CLICK_VIDEO_CHAT_RPC_TOKEN` 生成 HMAC-SHA256 请求签名，签名绑定请求内容和目标网关，包含 30 秒时间戳与一次性随机数，nonce 保留到该签名失效，不在网络上传送共享密钥并拒绝请求重放；单机 loopback 会生成进程内临时密钥，多节点必须为所有实例设置相同密钥。多节点监听地址仅绑定私网网卡，并通过防火墙限制端口访问。
+聊天 WebSocket 地址为既有 `/douyin/message/ws`，浏览器用 query token 鉴权；`ping` 每 10 秒续期 Redis 路由，服务端 30 秒无心跳关闭连接。普通消息、AI 提问和 AI 回复先写入 Redis Stream，再按 50 条或 250 毫秒批量调用 contact.rpc 写入消息表；contact.rpc 通过 `message.event_id` 唯一索引保证消费重试幂等，只有 DB 写入成功后才确认 Stream。好友关系缓存未命中时也通过 contact.rpc 读取，不跨服务查询关系表。部署升级前执行 `config/mysql/migrations/20261003_chat_message_event_id.sql`。为了让 Redis Stream 能跨进程重启恢复，Redis 必须启用 AOF；本仓库 compose 使用 `appendonly yes` 和 `appendfsync everysec`。多网关部署时，每个实例的 `chat.advertiseAddress` 必须唯一且可从其他实例访问，`chat.rpcListenAddress` 是本机监听地址；默认 `127.0.0.1:8014` 仅适用于单机开发。节点 gRPC 推送用 `CLICK_VIDEO_CHAT_RPC_TOKEN` 生成 HMAC-SHA256 请求签名，签名绑定请求内容和目标网关，包含 30 秒时间戳与一次性随机数；nonce 使用 ChatRedis 的 `SETNX` 保留到签名失效，在跨节点及进程重启后继续拒绝重放；Redis 不可用时认证失败关闭。不在网络上传送共享密钥，单机 loopback 会生成进程内临时密钥，多节点必须为所有实例设置相同密钥。多节点监听地址仅绑定私网网卡，并通过防火墙限制端口访问。
 
 `video_info_count:{id}` 的点赞字段在脏数据待刷盘期间不设 TTL；刷盘成功且该视频没有新脏写入后，按基础 TTL 加随机偏移过期。计数读取先 Pipeline 查 Hash，miss 用 video 表值返回并异步以 `HSETNX` 回填，避免覆盖并发增量。计数事件携带版本和事务内计算的绝对计数；Redis 的 `favorite_count_version` 不过期，即使计数 Hash 淘汰也能拒绝迟到事件，并可从新事件的绝对计数恢复计数缓存。网关先向 user.rpc 申请数据库动作序号，序号在用户/视频状态行上事务递增，不依赖 Redis 是否保留缓存数据；user.rpc 消费者按已应用序号拒绝迟到动作。事务 Outbox 同时重试用户缓存失效和视频计数事件发布。
 

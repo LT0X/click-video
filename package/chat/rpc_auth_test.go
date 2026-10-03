@@ -2,7 +2,9 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,7 +19,7 @@ import (
 func TestChatRPCAuthUnaryInterceptorRejectsInvalidRequests(t *testing.T) {
 	request := &chatpush.DeliveryRequest{EventID: "event-1", Content: "message"}
 	target := "gateway-a.internal:8014"
-	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, newChatRPCReplayGuard())
+	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, newChatRPCReplayGuard(&memoryChatRPCNonceStore{}))
 	handler := func(context.Context, interface{}) (interface{}, error) {
 		return &chatpush.DeliveryResponse{Delivered: true}, nil
 	}
@@ -50,7 +52,7 @@ func TestChatRPCAuthUnaryInterceptorAllowsSignedRequestOnce(t *testing.T) {
 	target := "gateway-a.internal:8014"
 	values := signedRPCMetadata(t, "expected-secret", target, request, time.Now(), "2123456789abcdef0123456789abcdef0123456789abcdef")
 	ctx := metadata.NewIncomingContext(context.Background(), values)
-	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, newChatRPCReplayGuard())
+	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, newChatRPCReplayGuard(&memoryChatRPCNonceStore{}))
 	called := 0
 	handler := func(context.Context, interface{}) (interface{}, error) {
 		called++
@@ -72,7 +74,7 @@ func TestChatRPCAuthUnaryInterceptorBindsRequestToTargetGateway(t *testing.T) {
 	request := &chatpush.DeliveryRequest{EventID: "event-3", Content: "targeted message"}
 	values := signedRPCMetadata(t, "expected-secret", "gateway-a.internal:8014", request, time.Now(), "3123456789abcdef0123456789abcdef0123456789abcdef")
 	ctx := metadata.NewIncomingContext(context.Background(), values)
-	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", "gateway-b.internal:8014", newChatRPCReplayGuard())
+	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", "gateway-b.internal:8014", newChatRPCReplayGuard(&memoryChatRPCNonceStore{}))
 	_, err := interceptor(ctx, request, &grpc.UnaryServerInfo{FullMethod: chatpush.ChatPush_Deliver_FullMethodName}, func(context.Context, interface{}) (interface{}, error) {
 		t.Fatal("handler called for a request signed for another gateway")
 		return nil, nil
@@ -84,13 +86,58 @@ func TestChatRPCAuthUnaryInterceptorBindsRequestToTargetGateway(t *testing.T) {
 
 func TestReplayGuardRetainsNonceUntilSignatureExpires(t *testing.T) {
 	now := time.Unix(100, 0)
-	guard := newChatRPCReplayGuard()
+	store := &memoryChatRPCNonceStore{}
+	guard := newChatRPCReplayGuard(store)
 	expiresAt := now.Add(2 * chatRPCAuthWindow)
-	if !guard.accept("nonce", expiresAt, now) {
-		t.Fatal("first nonce use was rejected")
+	accepted, err := guard.accept(context.Background(), "gateway-a.internal:8014", "nonce", expiresAt, now)
+	if err != nil || !accepted {
+		t.Fatalf("first nonce use accepted=%v error=%v", accepted, err)
 	}
-	if guard.accept("nonce", expiresAt, now.Add(chatRPCAuthWindow+time.Second)) {
+	if store.lastTTL < 59*time.Second || store.lastTTL > 60*time.Second {
+		t.Fatalf("stored nonce TTL = %v, want 59–60 seconds for positive clock skew", store.lastTTL)
+	}
+	accepted, err = guard.accept(context.Background(), "gateway-a.internal:8014", "nonce", expiresAt, now.Add(chatRPCAuthWindow+time.Second))
+	if err != nil {
+		t.Fatalf("second nonce check error = %v", err)
+	}
+	if accepted {
 		t.Fatal("nonce was accepted again before the signed timestamp expired")
+	}
+}
+
+func TestRPCReplayGuardRejectsNonceAcrossInstances(t *testing.T) {
+	target := "gateway-a.internal:8014"
+	request := &chatpush.DeliveryRequest{EventID: "event-4", Content: "restart-safe"}
+	values := signedRPCMetadata(t, "expected-secret", target, request, time.Now(), "4123456789abcdef0123456789abcdef0123456789abcdef")
+	ctx := metadata.NewIncomingContext(context.Background(), values)
+	store := &memoryChatRPCNonceStore{}
+	guards := []*chatRPCReplayGuard{newChatRPCReplayGuard(store), newChatRPCReplayGuard(store)}
+	for i, guard := range guards {
+		interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, guard)
+		_, err := interceptor(ctx, request, &grpc.UnaryServerInfo{FullMethod: chatpush.ChatPush_Deliver_FullMethodName}, func(context.Context, interface{}) (interface{}, error) {
+			return &chatpush.DeliveryResponse{Delivered: true}, nil
+		})
+		if i == 0 && err != nil {
+			t.Fatalf("first instance rejected request: %v", err)
+		}
+		if i == 1 && status.Code(err) != codes.Unauthenticated {
+			t.Fatalf("second instance replay error = %v, want unauthenticated", err)
+		}
+	}
+}
+
+func TestChatRPCAuthUnaryInterceptorFailsClosedWhenNonceStoreUnavailable(t *testing.T) {
+	target := "gateway-a.internal:8014"
+	request := &chatpush.DeliveryRequest{EventID: "event-5", Content: "signed"}
+	values := signedRPCMetadata(t, "expected-secret", target, request, time.Now(), "5123456789abcdef0123456789abcdef0123456789abcdef")
+	ctx := metadata.NewIncomingContext(context.Background(), values)
+	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, newChatRPCReplayGuard(failingChatRPCNonceStore{}))
+	_, err := interceptor(ctx, request, &grpc.UnaryServerInfo{FullMethod: chatpush.ChatPush_Deliver_FullMethodName}, func(context.Context, interface{}) (interface{}, error) {
+		t.Fatal("handler called while the shared replay store is unavailable")
+		return nil, nil
+	})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("interceptor error = %v, want unavailable", err)
 	}
 }
 
@@ -131,4 +178,30 @@ func signedRPCMetadata(t *testing.T, token, target string, request *chatpush.Del
 		chatRPCNonceMetadataKey, nonce,
 		chatRPCSignatureMetadataKey, signature,
 	)
+}
+
+type memoryChatRPCNonceStore struct {
+	mu      sync.Mutex
+	seen    map[string]time.Time
+	lastTTL time.Duration
+}
+
+func (s *memoryChatRPCNonceStore) Claim(_ context.Context, key string, ttl time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = make(map[string]time.Time)
+	}
+	s.lastTTL = ttl
+	if expiry, exists := s.seen[key]; exists && expiry.After(time.Now()) {
+		return false, nil
+	}
+	s.seen[key] = time.Now().Add(ttl)
+	return true, nil
+}
+
+type failingChatRPCNonceStore struct{}
+
+func (failingChatRPCNonceStore) Claim(context.Context, string, time.Duration) (bool, error) {
+	return false, errors.New("redis unavailable")
 }

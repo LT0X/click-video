@@ -11,9 +11,9 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/go-redis/redis"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -29,34 +29,44 @@ const (
 	chatRPCAuthWindow           = 30 * time.Second
 )
 
-// chatRPCReplayGuard 限制认证请求在有效期内只能被同一个节点接受一次。
+type chatRPCNonceStore interface {
+	Claim(context.Context, string, time.Duration) (bool, error)
+}
+
+type redisChatRPCNonceStore struct {
+	client *redis.Client
+}
+
+func (s redisChatRPCNonceStore) Claim(_ context.Context, key string, ttl time.Duration) (bool, error) {
+	if s.client == nil {
+		return false, fmt.Errorf("聊天 RPC nonce Redis 客户端未初始化")
+	}
+	return s.client.SetNX(key, "1", ttl).Result()
+}
+
+// chatRPCReplayGuard 使用共享 Redis 原子 SETNX 去重，进程重启或跨节点也不会重复接受 nonce。
 type chatRPCReplayGuard struct {
-	mu        sync.Mutex
-	seen      map[string]time.Time
-	nextPrune time.Time
+	store chatRPCNonceStore
 }
 
-func newChatRPCReplayGuard() *chatRPCReplayGuard {
-	return &chatRPCReplayGuard{seen: make(map[string]time.Time)}
+func newChatRPCReplayGuard(store chatRPCNonceStore) *chatRPCReplayGuard {
+	return &chatRPCReplayGuard{store: store}
 }
 
-func (g *chatRPCReplayGuard) accept(nonce string, expiresAt, now time.Time) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func (g *chatRPCReplayGuard) accept(ctx context.Context, target, nonce string, expiresAt, now time.Time) (bool, error) {
+	ttl := expiresAt.Sub(now)
+	if ttl <= 0 || g.store == nil {
+		return false, nil
+	}
+	if ttl < time.Millisecond {
+		ttl = time.Millisecond
+	}
+	key := chatRPCNonceKey(target, nonce)
+	return g.store.Claim(ctx, key, ttl)
+}
 
-	if expiry, exists := g.seen[nonce]; exists && expiry.After(now) {
-		return false
-	}
-	if !now.Before(g.nextPrune) {
-		for oldNonce, expiry := range g.seen {
-			if !expiry.After(now) {
-				delete(g.seen, oldNonce)
-			}
-		}
-		g.nextPrune = now.Add(chatRPCAuthWindow)
-	}
-	g.seen[nonce] = expiresAt
-	return true
+func chatRPCNonceKey(target, nonce string) string {
+	return fmt.Sprintf("chat:rpc:nonce:%s:%s", target, nonce)
 }
 
 // ResolveRPCToken 单机 loopback 开发自动生成进程内密钥，多节点监听必须显式配置共享密钥。
@@ -141,7 +151,14 @@ func chatRPCAuthUnaryInterceptor(token, target string, replayGuard *chatRPCRepla
 		if err != nil || !hmac.Equal([]byte(expected), []byte(signature)) {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 认证失败")
 		}
-		if replayGuard == nil || !replayGuard.accept(nonce, expiresAt, now) {
+		if replayGuard == nil {
+			return nil, status.Error(codes.Unavailable, "聊天节点 RPC 重放校验不可用")
+		}
+		accepted, err := replayGuard.accept(ctx, targetValue, nonce, expiresAt, now)
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, "聊天节点 RPC 重放校验暂不可用")
+		}
+		if !accepted {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 请求重复")
 		}
 		return handler(ctx, req)
