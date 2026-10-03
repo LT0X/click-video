@@ -34,7 +34,7 @@ func main() {
 	cache.InitRedis()
 	chatRegistry := chat.NewRegistry()
 	chatRoutes := chat.NewRedisRoutes(cache.ChatRedisClient)
-	chatRemote := chat.NewGRPCRemotePusher()
+	chatRemote := chat.NewGRPCRemotePusher(config.System.Chat.RPCToken)
 	chatCache := chat.NewCache(cache.ChatRedisClient)
 	chatBuffer := chat.NewStreamBuffer(cache.ChatRedisClient, "", func(ctx context.Context, messages []chat.Message) error {
 		request := &contact.CreateMessagesBatchRequest{Messages: make([]*contact.ChatMessageInput, 0, len(messages))}
@@ -63,7 +63,7 @@ func main() {
 	})
 	service.ConfigureChatPipeline(chatDispatcher, chatCache)
 	ws.ConfigureChat(chatRegistry, chatRoutes, chatDispatcher, config.System.Chat.AdvertiseAddress)
-	if _, err := chat.StartPushRPC(config.System.Chat.RPCListenAddress, chatRegistry); err != nil {
+	if _, err := chat.StartPushRPC(config.System.Chat.RPCListenAddress, chatRegistry, config.System.Chat.RPCToken); err != nil {
 		zap.L().Fatal("聊天节点 gRPC 推送服务启动失败", zap.Error(err))
 	}
 	go chatBuffer.Run(context.Background())

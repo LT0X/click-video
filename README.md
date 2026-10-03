@@ -476,8 +476,9 @@ commentRedis:          # db 2 评论域
 chatRedis:             # db 3 聊天域，host/port/password/poolSize 默认复用 userRedis
   db: 3
 chat:
-  rpcListenAddress: "0.0.0.0:8014"
+  rpcListenAddress: "127.0.0.1:8014" # 默认仅本机访问；多节点填写私网网卡地址
   advertiseAddress: "127.0.0.1:8014" # 多节点部署要为每个网关配置其他节点可访问的地址
+  rpcToken: "" # 通过环境变量 CLICK_VIDEO_CHAT_RPC_TOKEN 注入，不要把密钥提交到仓库
 
 rabbitmq:
   host: 192.168.169.128
@@ -521,7 +522,7 @@ ContactRpc:            # gRPC 服务发现（etcd）
 | `chat:history:{minUserID}:{maxUserID}:complete` | String | 标记历史 ZSet 完整；与历史缓存同 TTL（DB3） |
 | `chat:message_newest:{userID}:{toUserID}` | ZSet | 单向好友列表的最近消息，10 分钟加随机偏移（DB3） |
 
-聊天 WebSocket 地址为既有 `/douyin/message/ws`，浏览器用 query token 鉴权；`ping` 每 10 秒续期 Redis 路由，服务端 30 秒无心跳关闭连接。普通消息、AI 提问和 AI 回复先写入 Redis Stream，再按 50 条或 250 毫秒批量调用 contact.rpc 写入消息表；contact.rpc 通过 `message.event_id` 唯一索引保证消费重试幂等，只有 DB 写入成功后才确认 Stream。部署升级前执行 `config/mysql/migrations/20261003_chat_message_event_id.sql`。为了让 Redis Stream 能跨进程重启恢复，Redis 必须启用 AOF；本仓库 compose 使用 `appendonly yes` 和 `appendfsync everysec`。多网关部署时，每个实例的 `chat.advertiseAddress` 必须填写其他实例可访问的地址，`chat.rpcListenAddress` 是本机监听地址；默认 `127.0.0.1:8014` 仅适用于单机开发。
+聊天 WebSocket 地址为既有 `/douyin/message/ws`，浏览器用 query token 鉴权；`ping` 每 10 秒续期 Redis 路由，服务端 30 秒无心跳关闭连接。普通消息、AI 提问和 AI 回复先写入 Redis Stream，再按 50 条或 250 毫秒批量调用 contact.rpc 写入消息表；contact.rpc 通过 `message.event_id` 唯一索引保证消费重试幂等，只有 DB 写入成功后才确认 Stream。好友关系缓存未命中时也通过 contact.rpc 读取，不跨服务查询关系表。部署升级前执行 `config/mysql/migrations/20261003_chat_message_event_id.sql`。为了让 Redis Stream 能跨进程重启恢复，Redis 必须启用 AOF；本仓库 compose 使用 `appendonly yes` 和 `appendfsync everysec`。多网关部署时，每个实例的 `chat.advertiseAddress` 必须填写其他实例可访问的地址，`chat.rpcListenAddress` 是本机监听地址；默认 `127.0.0.1:8014` 仅适用于单机开发。节点 gRPC 推送使用 `CLICK_VIDEO_CHAT_RPC_TOKEN` 共享密钥认证，所有实例须配置同一密钥；多节点监听地址仅绑定私网网卡，并通过防火墙限制该端口访问。
 
 `video_info_count:{id}` 的点赞字段在脏数据待刷盘期间不设 TTL；刷盘成功且该视频没有新脏写入后，按基础 TTL 加随机偏移过期。计数读取先 Pipeline 查 Hash，miss 用 video 表值返回并异步以 `HSETNX` 回填，避免覆盖并发增量。计数事件携带版本和事务内计算的绝对计数；Redis 的 `favorite_count_version` 不过期，即使计数 Hash 淘汰也能拒绝迟到事件，并可从新事件的绝对计数恢复计数缓存。网关先向 user.rpc 申请数据库动作序号，序号在用户/视频状态行上事务递增，不依赖 Redis 是否保留缓存数据；user.rpc 消费者按已应用序号拒绝迟到动作。事务 Outbox 同时重试用户缓存失效和视频计数事件发布。
 

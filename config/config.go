@@ -50,6 +50,7 @@ type UploadConfig struct {
 type ChatConfig struct {
 	RPCListenAddress string `mapstructure:"rpcListenAddress"`
 	AdvertiseAddress string `mapstructure:"advertiseAddress"`
+	RPCToken         string `mapstructure:"rpcToken"`
 }
 
 type RabbitMQ struct {
@@ -145,6 +146,9 @@ func Init() {
 }
 
 func applyChatDefaults() {
+	if System.Chat.RPCToken == "" {
+		System.Chat.RPCToken = os.Getenv("CLICK_VIDEO_CHAT_RPC_TOKEN")
+	}
 	if System.ChatRedis.Host == "" {
 		System.ChatRedis.Host = System.UserRedis.Host
 	}
@@ -161,7 +165,7 @@ func applyChatDefaults() {
 		System.ChatRedis.Database = 3
 	}
 	if System.Chat.RPCListenAddress == "" {
-		System.Chat.RPCListenAddress = "0.0.0.0:8014"
+		System.Chat.RPCListenAddress = "127.0.0.1:8014"
 	}
 	if System.Chat.AdvertiseAddress == "" {
 		System.Chat.AdvertiseAddress = "127.0.0.1:8014"

@@ -254,15 +254,18 @@ func (service *RelationService) RelationFriendList() (*response.FriendResponse, 
 	following, err := cache.GetFollowUserIDSet(service.UserID)
 	if err != nil {
 		zap.L().Sugar().Warn(constant.CacheMiss)
-		following, err = database.SelectFollowingByUserID(service.UserID)
-		if err != nil {
-			return nil, err
+		// 关注关系归 contact.rpc 所有，网关不能在缓存未命中时直查 relation 表。
+		followingResp, rpcErr := database.RPC.ContactRpc.SelectFollowingByUserID(context.TODO(), &contact.SelectFollowingByUserIDRequest{
+			UserID: service.UserID,
+		})
+		if rpcErr != nil {
+			return nil, rpcErr
 		}
+		following = followingResp.UserID
 		go func() {
 			// 将缓存写入
-			err = cache.SetFollowUserIDSet(service.UserID, following)
-			if err != nil {
-				zap.L().Error(err.Error())
+			if cacheErr := cache.SetFollowUserIDSet(service.UserID, following); cacheErr != nil {
+				zap.L().Error(cacheErr.Error())
 			}
 		}()
 	}

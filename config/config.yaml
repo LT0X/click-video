@@ -68,8 +68,9 @@ commentRedis:
 chatRedis: # db 3：聊天路由、Redis Stream 缓冲和会话缓存；连接地址复用 userRedis
   db: 3
 chat:
-  rpcListenAddress: "0.0.0.0:8014" # 网关节点间 gRPC 投递监听地址
+  rpcListenAddress: "127.0.0.1:8014" # 默认仅本机可访问；多节点改为私网网卡地址
   advertiseAddress: "127.0.0.1:8014" # 其他网关可访问的本节点地址，多节点部署需逐节点配置
+  rpcToken: "" # 多节点必须为所有网关设置 CLICK_VIDEO_CHAT_RPC_TOKEN，勿提交密钥
 
 rabbitmq:
   host: 192.168.169.128 # docker： dev-rabbitmq:6379 本机：127.0.0.1:5672

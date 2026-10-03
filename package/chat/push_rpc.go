@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type GatewayPushServer struct {
@@ -40,19 +42,24 @@ func (s *GatewayPushServer) Deliver(_ context.Context, in *chatpush.DeliveryRequ
 type GRPCRemotePusher struct {
 	mu    sync.Mutex
 	conns map[string]*grpc.ClientConn
+	token string
 }
 
-func NewGRPCRemotePusher() *GRPCRemotePusher {
-	return &GRPCRemotePusher{conns: make(map[string]*grpc.ClientConn)}
+func NewGRPCRemotePusher(token string) *GRPCRemotePusher {
+	return &GRPCRemotePusher{conns: make(map[string]*grpc.ClientConn), token: token}
 }
 
 func (p *GRPCRemotePusher) Push(ctx context.Context, address string, msg Message) error {
+	if strings.TrimSpace(p.token) == "" {
+		return fmt.Errorf("聊天节点 RPC 认证密钥未配置")
+	}
 	conn, err := p.connection(ctx, address)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 	defer cancel()
+	ctx = metadata.AppendToOutgoingContext(ctx, chatRPCTokenMetadataKey, p.token)
 	_, err = chatpush.NewChatPushClient(conn).Deliver(ctx, &chatpush.DeliveryRequest{
 		EventID: msg.EventID, MessageID: msg.ID, Content: msg.Content, CreateTime: msg.CreateTime,
 		FromUserID: msg.FromUserID, ToUserID: msg.ToUserID,
@@ -93,12 +100,15 @@ func (p *GRPCRemotePusher) Close() error {
 	return firstErr
 }
 
-func StartPushRPC(address string, registry *Registry) (func(), error) {
+func StartPushRPC(address string, registry *Registry, token string) (func(), error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("聊天节点 RPC 认证密钥未配置")
+	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("监听聊天节点 RPC 地址 %q 失败: %w", address, err)
 	}
-	server := grpc.NewServer()
+	server := grpc.NewServer(grpc.UnaryInterceptor(chatRPCAuthUnaryInterceptor(token)))
 	chatpush.RegisterChatPushServer(server, NewGatewayPushServer(registry))
 	go func() {
 		if err := server.Serve(listener); err != nil {
