@@ -1,6 +1,7 @@
 package mq
 
 import (
+	"context"
 	"douyin/config"
 	"fmt"
 	"time"
@@ -67,4 +68,5 @@ func InitMQ() {
 	}()
 	initRelation()
 	initComment()
+	go runCacheInvalidationConsumer(context.Background(), favoriteBroker)
 }

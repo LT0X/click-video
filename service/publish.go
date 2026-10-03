@@ -13,7 +13,6 @@ import (
 	"douyin/rpc/video/video"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/gofrs/uuid"
@@ -73,9 +72,6 @@ func (service *PublisService) PublishAction(userID uint64, buf *bytes.Buffer) (*
 	}
 	if created == nil || created.VideoID == 0 {
 		return nil, errors.New("video.rpc 返回了无效的视频 ID")
-	}
-	if cache.VideoIDBloomFilter != nil {
-		cache.VideoIDBloomFilter.AddString(strconv.FormatUint(created.VideoID, 10))
 	}
 	if cache.UserRedisClient != nil && cache.VideoRedisClient != nil {
 		if err := cache.PublishVideo(userID, created.VideoID); err != nil {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/bits-and-blooms/bloom/v3"
 	"github.com/go-redis/redis"
 	"go.uber.org/zap"
 )
@@ -15,8 +14,7 @@ var UserRedisClient *redis.Client
 var VideoRedisClient *redis.Client
 var CommentRedisClient *redis.Client
 
-var UserIDBloomFilter *bloom.BloomFilter
-var VideoIDBloomFilter *bloom.BloomFilter
+var VideoIDBloomFilter *IDBloomFilter
 
 func InitRedis(ctx *svc.ServiceContext) {
 	// userRedis 连接
@@ -54,24 +52,22 @@ func InitRedis(ctx *svc.ServiceContext) {
 	}
 	zap.L().Info("redis连接: 成功")
 
-	initBloomFilter(ctx)
+	if err := initBloomFilter(ctx); err != nil {
+		zap.L().Fatal("初始化 video ID 布隆过滤器失败", zap.Error(err))
+	}
 }
 
 // 初始化布隆过滤器
 // 布隆过滤器的预估元素数量 和误报率 决定了底层bitmap的大小 和 无偏哈希函数的个数
-func initBloomFilter(ctx *svc.ServiceContext) {
-	// 估计会有10万个用户 误报率是0.01
-	UserIDBloomFilter = bloom.NewWithEstimates(100000, 0.01)
-	userIDList := make([]uint64, 0)
-	ctx.DBList.Mysql.Model(&model.User{}).Select("id").Find(&userIDList)
-	for _, u := range userIDList {
-		UserIDBloomFilter.AddString(strconv.FormatUint(u, 10))
-	}
-	VideoIDBloomFilter = bloom.NewWithEstimates(100000, 0.01)
+func initBloomFilter(ctx *svc.ServiceContext) error {
+	VideoIDBloomFilter = NewIDBloomFilter(100000, 0.01)
 	videoIDList := make([]uint64, 0)
-	ctx.DBList.Mysql.Model(&model.Video{}).Select("id").Find(&videoIDList)
+	if err := ctx.DBList.Mysql.Model(&model.Video{}).Select("id").Find(&videoIDList).Error; err != nil {
+		return fmt.Errorf("加载视频 ID 布隆过滤器数据失败: %w", err)
+	}
 	for _, v := range videoIDList {
 		VideoIDBloomFilter.AddString(strconv.FormatUint(v, 10))
 	}
 	zap.L().Info("初始化布隆过滤器: 成功")
+	return nil
 }

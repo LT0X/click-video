@@ -50,6 +50,15 @@ LOCK TABLES `comment` WRITE;
 /*!40000 ALTER TABLE `comment` ENABLE KEYS */;
 UNLOCK TABLES;
 
+-- 评论 DB 事务提交后由 video.rpc Outbox 发布缓存失效事件。
+DROP TABLE IF EXISTS `comment_cache_invalidation_outbox`;
+CREATE TABLE `comment_cache_invalidation_outbox` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `video_id` bigint unsigned NOT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 --
 -- Table structure for table `favorite`
 --

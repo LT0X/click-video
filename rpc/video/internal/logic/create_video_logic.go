@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"douyin/rpc/video/internal/cache"
 	"douyin/rpc/video/internal/model"
 	"douyin/rpc/video/internal/svc"
 	"douyin/rpc/video/video"
@@ -66,5 +67,6 @@ func (l *CreateVideoLogic) CreateVideo(in *video.CreateVideoRequest) (*video.Cre
 	if err != nil {
 		return nil, err
 	}
+	cache.AddVideoID(videoRecord.ID)
 	return &video.CreateVideoResponse{VideoID: videoRecord.ID}, nil
 }

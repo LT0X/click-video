@@ -2,7 +2,6 @@ package logic
 
 import (
 	"context"
-	"douyin/rpc/video/internal/cache"
 	"douyin/rpc/video/internal/model"
 	"gorm.io/gorm"
 
@@ -34,8 +33,11 @@ func (l *CommentDeleteLogic) CommentDelete(in *video.CommentDeleteRequest) (*vid
 	err := l.svcCtx.DBList.Mysql.Transaction(func(tx *gorm.DB) error {
 		// 删除要先检查里面有没有啊
 		err := tx.Where("id = ? AND video_id = ? AND user_id = ?", in.CommentID, in.VideoID, in.UserID).First(&comment).Error
-		if err != nil || comment.ID == 0 {
+		if err != nil {
 			return err
+		}
+		if comment.ID == 0 {
+			return gorm.ErrRecordNotFound
 		}
 		err = tx.Delete(&comment).Error
 		if err != nil {
@@ -50,7 +52,7 @@ func (l *CommentDeleteLogic) CommentDelete(in *video.CommentDeleteRequest) (*vid
 		if err != nil {
 			return err
 		}
-		return cache.CommentDelete(&comment)
+		return tx.Create(&model.CommentCacheInvalidationOutbox{VideoID: in.VideoID}).Error
 	})
 	if err != nil {
 		return nil, err
