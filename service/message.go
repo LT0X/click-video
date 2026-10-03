@@ -8,6 +8,7 @@ import (
 	"douyin/package/chat"
 	"douyin/package/constant"
 	"douyin/package/llm"
+	"douyin/package/metrics"
 	"douyin/response"
 	"douyin/rpc/contact/contact"
 	"fmt"
@@ -137,18 +138,31 @@ func (service *MessageService) MessageAction(loginUserID uint64) error {
 	return nil
 }
 
-func (service *MessageService) MessageChat(loginUserID uint64) (*response.MessageResponse, error) {
+func (service *MessageService) MessageChat(loginUserID uint64) (messageResponse *response.MessageResponse, requestErr error) {
+	startedAt := time.Now()
+	source := "other"
+	cacheResult := ""
+	defer func() {
+		recordChatHistoryMetrics(metrics.Default, source, cacheResult, requestErr, time.Since(startedAt))
+	}()
+
 	if loginUserID == service.ToUserID {
 		err := fmt.Errorf("ToUserID不能是自己")
 		return nil, err
 	}
+	source = "database"
 	_, chatCache := currentChatPipeline()
 	if chatCache != nil {
 		cached, hit, err := chatCache.GetHistory(context.Background(), loginUserID, service.ToUserID, service.Pre_msg_time)
 		if err != nil {
+			cacheResult = "error"
 			zap.L().Warn("读取聊天历史缓存失败，回源 contact.rpc", zap.Error(err))
 		} else if hit {
+			cacheResult = "hit"
+			source = "cache"
 			return messageResponseFromCache(cached), nil
+		} else {
+			cacheResult = "miss"
 		}
 	}
 	resp, err := database.RPC.ContactRpc.MessageList(context.TODO(), &contact.MessageListRequest{
@@ -176,6 +190,17 @@ func (service *MessageService) MessageChat(loginUserID uint64) (*response.Messag
 		}()
 	}
 	return messageResponseFromCache(cacheMessages), nil
+}
+
+func recordChatHistoryMetrics(registry *metrics.Registry, source, cacheResult string, requestErr error, duration time.Duration) {
+	if cacheResult != "" {
+		registry.ObserveChatHistoryCacheAccess(cacheResult)
+	}
+	result := "success"
+	if requestErr != nil {
+		result = "error"
+	}
+	registry.ObserveChatHistoryRequest(source, result, duration)
 }
 
 func messageResponseFromCache(messages []chat.Message) *response.MessageResponse {

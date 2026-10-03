@@ -8,6 +8,7 @@ import (
 	"douyin/package/cache"
 	"douyin/package/chat"
 	"douyin/package/llm"
+	"douyin/package/metrics"
 	"douyin/package/mq"
 	"douyin/package/upload"
 	"douyin/package/util"
@@ -29,6 +30,7 @@ func main() {
 	// 手动调用初始化函数 可以考虑使用init函数
 	config.Init()
 	util.InitZap()
+	metrics.StartHTTPServer(config.System.Monitoring.ListenAddressOrDefault(), "gateway", metrics.Default.Handler())
 	database.InitMySQL()
 	database.NewRPCServiceContext()
 	cache.InitRedis()

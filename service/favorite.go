@@ -6,6 +6,7 @@ import (
 	"douyin/model"
 	"douyin/package/cache"
 	"douyin/package/constant"
+	"douyin/package/metrics"
 	"douyin/package/mq"
 	"douyin/package/util"
 	"douyin/response"
@@ -31,7 +32,9 @@ type FavoriteService struct {
 
 func (service *FavoriteService) Favorite(userID uint64) (*response.CommonResponse, error) {
 	// TODO 可以拿redis限制一下用户点赞的速率 比如1分钟只能点赞10次
+	startedAt := time.Now()
 	err := service.sendFavoriteAction(userID, 1)
+	recordFavoriteRequestMetrics(metrics.Default, "favorite", err, time.Since(startedAt))
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
@@ -43,7 +46,9 @@ func (service *FavoriteService) Favorite(userID uint64) (*response.CommonRespons
 }
 
 func (service *FavoriteService) UnFavorite(userID uint64) (*response.CommonResponse, error) {
+	startedAt := time.Now()
 	err := service.sendFavoriteAction(userID, -1)
+	recordFavoriteRequestMetrics(metrics.Default, "unfavorite", err, time.Since(startedAt))
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
@@ -52,6 +57,14 @@ func (service *FavoriteService) UnFavorite(userID uint64) (*response.CommonRespo
 		StatusCode: response.Success,
 		StatusMsg:  constant.UnFavoriteSuccess,
 	}, nil
+}
+
+func recordFavoriteRequestMetrics(registry *metrics.Registry, action string, requestErr error, duration time.Duration) {
+	result := "success"
+	if requestErr != nil {
+		result = "error"
+	}
+	registry.ObserveFavoriteRequest(action, result, duration)
 }
 
 func (service *FavoriteService) sendFavoriteAction(userID uint64, delta int64) error {

@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -60,6 +61,20 @@ type RabbitMQ struct {
 	Password string `mapstructure:"password"`
 }
 
+type MonitoringConfig struct {
+	ListenAddress string `mapstructure:"listenAddress"`
+}
+
+const defaultMonitoringListenAddress = "127.0.0.1:9100"
+
+// ListenAddressOrDefault 为 metrics 端点提供 loopback 默认地址。
+func (monitoring MonitoringConfig) ListenAddressOrDefault() string {
+	if address := strings.TrimSpace(monitoring.ListenAddress); address != "" {
+		return address
+	}
+	return defaultMonitoringListenAddress
+}
+
 type QiNiuCloud struct {
 	Bucket    string `mapstructure:"bucket"`
 	AccessKey string `mapstructure:"accessKey"`
@@ -68,20 +83,21 @@ type QiNiuCloud struct {
 }
 
 type SystemConfig struct {
-	Qiniu        QiNiuCloud   `mapstructure:"qiniu"`
-	HttpAddress  HTTP         `mapstructure:"httpAddress"`
-	MysqlMaster  MySQL        `mapstructure:"mysqlMaster"`
-	MysqlSlave   MySQL        `mapstructure:"mysqlSlave"`
-	UserRedis    Redis        `mapstructure:"userRedis"`
-	VideoRedis   Redis        `mapstructure:"videoRedis"`
-	CommentRedis Redis        `mapstructure:"commentRedis"`
-	ChatRedis    Redis        `mapstructure:"chatRedis"`
-	Chat         ChatConfig   `mapstructure:"chat"`
-	Upload       UploadConfig `mapstructure:"upload"`
-	MQ           RabbitMQ     `mapstructure:"rabbitmq"`
-	Mode         string       `mapstructure:"mode"`
-	JwtSecret    string       `mapstructure:"jwtSecret"`
-	GPTSecret    string       `mapstructure:"gptSecret"`
+	Qiniu        QiNiuCloud       `mapstructure:"qiniu"`
+	HttpAddress  HTTP             `mapstructure:"httpAddress"`
+	MysqlMaster  MySQL            `mapstructure:"mysqlMaster"`
+	MysqlSlave   MySQL            `mapstructure:"mysqlSlave"`
+	UserRedis    Redis            `mapstructure:"userRedis"`
+	VideoRedis   Redis            `mapstructure:"videoRedis"`
+	CommentRedis Redis            `mapstructure:"commentRedis"`
+	ChatRedis    Redis            `mapstructure:"chatRedis"`
+	Chat         ChatConfig       `mapstructure:"chat"`
+	Upload       UploadConfig     `mapstructure:"upload"`
+	MQ           RabbitMQ         `mapstructure:"rabbitmq"`
+	Monitoring   MonitoringConfig `mapstructure:"monitoring"`
+	Mode         string           `mapstructure:"mode"`
+	JwtSecret    string           `mapstructure:"jwtSecret"`
+	GPTSecret    string           `mapstructure:"gptSecret"`
 }
 
 var System SystemConfig

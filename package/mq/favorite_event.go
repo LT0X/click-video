@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"douyin/config"
+	"douyin/package/metrics"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
@@ -308,6 +309,7 @@ func (broker *FavoriteEventBroker) publishRaw(exchange, routingKey, eventID stri
 			return err
 		}
 	}
+	recordPublishingTimestamp(&message, time.Now())
 	err := broker.publisher.Publish(exchange, routingKey, mandatory, false, message)
 	if err != nil {
 		broker.resetConnectionLocked()
@@ -438,6 +440,7 @@ func (broker *FavoriteEventBroker) consume(ctx context.Context, exchange, queue 
 			if !ok {
 				return fmt.Errorf("RabbitMQ consumer %q 已关闭", queue)
 			}
+			recordConsumerLag(metrics.Default, queue, delivery.Timestamp, time.Now())
 			if err := handler(delivery.Body); err != nil {
 				zap.L().Error("处理 RabbitMQ 消息失败", zap.String("queue", queue), zap.Error(err))
 				var invalid invalidFavoriteMessageError

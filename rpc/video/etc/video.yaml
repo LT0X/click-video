@@ -17,3 +17,4 @@ DBList:
     Port: "6379"
     Password:
     PoolSize: 100
+MetricsListenOn: 127.0.0.1:9113
