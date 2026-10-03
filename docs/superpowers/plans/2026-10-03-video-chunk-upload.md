@@ -102,7 +102,7 @@
 - [x] 写测试：同一 video ID 重试作品数更新只应用一次，未知用户返回错误。
 - [x] 确认测试失败后，实现 RPC schema、数据库唯一约束、服务逻辑和 generated stubs。
 - [x] 使既有 `/douyin/publish/action/` 改走 video.rpc/user.rpc，保留请求路径和 `CommonResponse` 字段。
-- [ ] 提交 Task 3：`feat(upload): 通过 RPC 幂等发布视频`。
+- [x] 提交 Task 3：`feat(upload): 通过 RPC 幂等发布视频`。
 
 ### Task 4: HTTP init/chunk/merge 与 Fiber 流式接入
 
@@ -120,11 +120,11 @@
 - merge 验证归属、完整分片和 MD5；取得三并发信号量后合并、创建 video/user RPC 记录并保存秒传映射。成功后清理分片目录，封面提取异步执行并经 video.rpc 回写 URL。
 - Fiber 开启 `StreamRequestBody`，保持现有 30MiB 全局上限；分片上限由上传配置单独校验。
 
-- [ ] 写 HTTP 测试：init 返回可续传 upload ID 和已上传列表；秒传命中返回已存在视频。
-- [ ] 写 HTTP 测试：raw body chunk 确认为 Fiber request stream 并写盘；无效 token、越界分片号和非 uploading 状态被拒绝。
-- [ ] 写 HTTP 测试：合并完整成功；缺片/错 MD5 不调用视频发布 RPC。
-- [ ] 确认测试失败后实现 handler/service/router、路径化封面输出和 Fiber stream 配置。
-- [ ] 提交 Task 4：`feat(upload): 增加流式分片上传接口`。
+- [x] 写 HTTP 测试：init 返回可续传 upload ID 和已上传列表；秒传命中返回已存在视频。
+- [x] 写 HTTP 测试：raw body chunk 确认为 Fiber request stream 并写盘；无效 token、越界分片号和非 uploading 状态被拒绝。
+- [x] 写 HTTP 测试：合并完整成功；缺片/错 MD5 不调用视频发布 RPC。
+- [x] 确认测试失败后实现 handler/service/router、路径化封面输出和 Fiber stream 配置。
+- [x] 提交 Task 4：`feat(upload): 增加流式分片上传接口`。
 
 ### Task 5: React Worker 与可续传上传器
 
@@ -141,10 +141,10 @@
 - `uploadFileInChunks(file, metadata, token, onProgress)` 发送 init、仅上传未完成分片、最多 3 并发、单片失败指数退避重试，最后 merge。
 - 5MiB 分片；请求将 Blob 作为 raw body 发送到 `/api/upload/chunk`，token 通过 header 传递。
 
-- [ ] 写测试：跳过 init 返回的已上传分片；失败分片按指数间隔重试并最终完成。
-- [ ] 写测试确认并发上传峰值不超过 3，MD5 worker 分块而非整文件读取。
-- [ ] 确认测试失败后加入 SparkMD5 并完成 worker、上传队列和上传弹窗接线。
-- [ ] 提交 Task 5：`feat(upload): 前端分片续传与并发重试`。
+- [x] 写测试：跳过 init 返回的已上传分片；失败分片按指数间隔重试并最终完成。
+- [x] 写测试确认并发上传峰值不超过 3，MD5 worker 分块而非整文件读取。
+- [x] 确认测试失败后加入 SparkMD5 并完成 worker、上传队列和上传弹窗接线。
+- [x] 提交 Task 5：`feat(upload): 前端分片续传与并发重试`。
 
 ### Task 6: 文档与完整验收
 
@@ -152,8 +152,11 @@
 - Modify: `README.md`
 - Review: `temp/optimize_doc/简历.txt`（忽略文件，只核对，不提交）
 
-- [ ] README 登记上传路由、配置、Redis keys、24h+jitter、chunk raw-body 限制和本地存储目录。
-- [ ] 运行 `go build ./...`、`go vet ./...`、`go test ./...`、前端测试和 production build。
-- [ ] 检查单分片服务使用请求流和有界缓冲，没有 `FormFile`/整片 `ReadAll`/整文件 `[]byte` 路径；检查合并最大并发为 3。
-- [ ] 运行 `git diff --check`，确认暂存清单没有 `.gitignore`、`temp/`、`.txt` 或凭据，再提交、推送并创建该任务独立 PR。
-- [ ] 提交 Task 6：`feat(upload): 补充上传配置与使用文档`。
+- [x] README 登记上传路由、配置、Redis keys、24h+jitter、chunk raw-body 限制和本地存储目录。
+- [x] 运行 `go build ./...`、`go vet ./...`、`go test ./...`、上传器定向前端测试和 production build。
+- [x] 检查单分片服务使用请求流和有界缓冲，没有 `FormFile`/整片 `ReadAll`/整文件 `[]byte` 路径；检查合并最大并发为 3。
+- [x] 运行 `git diff --check`，暂存清单只包含 README 和计划文档，没有 `.gitignore`、`temp/`、`.txt` 或凭据。
+- [x] 提交 Task 6：`feat(upload): 补充上传配置与使用文档`。
+- [ ] 推送分支并为大视频上传主题创建独立 PR，启用自动 Squash 合并。
+
+验收备注：上传器和 MD5 Worker 定向测试 7/7 通过，production build 成功。整套既有前端测试中的 `App.test.js` 在 Jest 解析 `swiper/react` 时失败；该测试未覆盖本次上传改动，未扩展修复到无关依赖。
