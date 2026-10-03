@@ -34,6 +34,18 @@ type Redis struct {
 	Password string `mapstructure:"password"`
 }
 
+type UploadConfig struct {
+	TempDir                string `mapstructure:"tempDir"`
+	PartSize               int64  `mapstructure:"partSize"`
+	MaxChunkSize           int64  `mapstructure:"maxChunkSize"`
+	MaxUploadSize          int64  `mapstructure:"maxUploadSize"`
+	MaxParts               int    `mapstructure:"maxParts"`
+	MergeConcurrency       int    `mapstructure:"mergeConcurrency"`
+	TTLHours               int    `mapstructure:"ttlHours"`
+	TTLJitterSeconds       int    `mapstructure:"ttlJitterSeconds"`
+	CleanupIntervalMinutes int    `mapstructure:"cleanupIntervalMinutes"`
+}
+
 type RabbitMQ struct {
 	Host     string `mapstructure:"host"`
 	Port     string `mapstructure:"port"`
@@ -49,17 +61,18 @@ type QiNiuCloud struct {
 }
 
 type SystemConfig struct {
-	Qiniu        QiNiuCloud `mapstructure:"qiniu"`
-	HttpAddress  HTTP       `mapstructure:"httpAddress"`
-	MysqlMaster  MySQL      `mapstructure:"mysqlMaster"`
-	MysqlSlave   MySQL      `mapstructure:"mysqlSlave"`
-	UserRedis    Redis      `mapstructure:"userRedis"`
-	VideoRedis   Redis      `mapstructure:"videoRedis"`
-	CommentRedis Redis      `mapstructure:"commentRedis"`
-	MQ           RabbitMQ   `mapstructure:"rabbitmq"`
-	Mode         string     `mapstructure:"mode"`
-	JwtSecret    string     `mapstructure:"jwtSecret"`
-	GPTSecret    string     `mapstructure:"gptSecret"`
+	Qiniu        QiNiuCloud   `mapstructure:"qiniu"`
+	HttpAddress  HTTP         `mapstructure:"httpAddress"`
+	MysqlMaster  MySQL        `mapstructure:"mysqlMaster"`
+	MysqlSlave   MySQL        `mapstructure:"mysqlSlave"`
+	UserRedis    Redis        `mapstructure:"userRedis"`
+	VideoRedis   Redis        `mapstructure:"videoRedis"`
+	CommentRedis Redis        `mapstructure:"commentRedis"`
+	Upload       UploadConfig `mapstructure:"upload"`
+	MQ           RabbitMQ     `mapstructure:"rabbitmq"`
+	Mode         string       `mapstructure:"mode"`
+	JwtSecret    string       `mapstructure:"jwtSecret"`
+	GPTSecret    string       `mapstructure:"gptSecret"`
 }
 
 var System SystemConfig
@@ -105,6 +118,7 @@ func Init() {
 	if err != nil {
 		log.Fatal("fatal error unmarshal config: ", err.Error())
 	}
+	applyUploadDefaults()
 
 	// 监视配置文件的变化 有变化就更改
 	viper.WatchConfig()
@@ -114,7 +128,41 @@ func Init() {
 		if err != nil {
 			log.Println("fatal error unmarshal config: ", err.Error())
 		}
+		applyUploadDefaults()
 		log.Println(System.Qiniu.OssDomain)
 	})
 	log.Println("viper读取配置文件成功")
+}
+
+func applyUploadDefaults() {
+	if System.Upload.TempDir == "" {
+		System.Upload.TempDir = filepath.Join(System.HttpAddress.VideoAddress, "upload", "tmp")
+	}
+	if System.Upload.PartSize <= 0 {
+		System.Upload.PartSize = 5 * 1024 * 1024
+	}
+	if System.Upload.MaxChunkSize <= 0 || System.Upload.MaxChunkSize < System.Upload.PartSize {
+		System.Upload.MaxChunkSize = 10 * 1024 * 1024
+		if System.Upload.MaxChunkSize < System.Upload.PartSize {
+			System.Upload.MaxChunkSize = System.Upload.PartSize
+		}
+	}
+	if System.Upload.MaxParts <= 0 || System.Upload.MaxParts > 10000 {
+		System.Upload.MaxParts = 10000
+	}
+	if System.Upload.MaxUploadSize <= 0 {
+		System.Upload.MaxUploadSize = System.Upload.PartSize * int64(System.Upload.MaxParts)
+	}
+	if System.Upload.MergeConcurrency <= 0 || System.Upload.MergeConcurrency > 3 {
+		System.Upload.MergeConcurrency = 3
+	}
+	if System.Upload.TTLHours <= 0 {
+		System.Upload.TTLHours = 24
+	}
+	if System.Upload.TTLJitterSeconds <= 0 {
+		System.Upload.TTLJitterSeconds = 300
+	}
+	if System.Upload.CleanupIntervalMinutes <= 0 {
+		System.Upload.CleanupIntervalMinutes = 30
+	}
 }

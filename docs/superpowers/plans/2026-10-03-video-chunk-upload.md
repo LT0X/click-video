@@ -4,7 +4,7 @@
 
 **Goal:** 实现本地磁盘版分片上传、断点续传、秒传、顺序合并和前端三路并发上传，同时保持既有发布 API 可用。
 
-**Architecture:** Fiber 网关用 request body stream 接收原始二进制分片并通过 `io.Copy` 写入本地临时目录；Redis 保存上传元数据和已传分片。合并器用有界缓冲区顺序合并并计算整体 MD5，完成后通过 video.rpc 创建视频记录、通过 user.rpc 幂等更新作品数。前端 Web Worker 增量计算 MD5，File.slice 分片后最多三路并发上传。
+**Architecture:** Fiber 网关用 request body stream 接收原始二进制分片并通过 `io.Copy` 写入本地临时目录；Redis 保存上传元数据和已传分片，本地 `meta.json` 记录任务元数据。合并器用有界缓冲区顺序合并并计算整体 MD5，完成后通过 video.rpc 创建视频记录、通过 user.rpc 幂等更新作品数。前端 Web Worker 增量计算 MD5，File.slice 分片后最多三路并发上传。
 
 **Tech Stack:** Go 1.20、Fiber v2.49.2、go-redis、MySQL/GORM、gRPC/go-zero、React 18、Web Worker、SparkMD5。
 
@@ -51,21 +51,27 @@
 ### Task 2: Redis 上传状态、参数校验与过期清理
 
 **Files:**
+- Create: `package/upload/metadata.go`
+- Create: `package/upload/lifecycle.go`
+- Modify: `package/upload/manager.go`
+- Test: `package/upload/lifecycle_test.go`
 - Create: `service/upload_state.go`
 - Create: `service/upload_state_test.go`
 - Modify: `config/config.go`
+- Test: `config/config_test.go`
 - Modify: `config/config.yaml`
-- Modify: `main.go`
 
 **Interfaces:**
 - 状态服务创建/读取上传元数据、读取已完成分片、标记分片、设置合并/完成状态、查秒传映射。
 - Key: `upload:{uploadID}`（Hash）、`upload_parts:{uploadID}`（Set）、`upload_md5:{md5}`（String）。元数据和分片集合使用同一 24h 基础 TTL 与随机偏移。
-- 清理任务扫描配置的本地临时目录，移除超过 TTL 的上传目录；已知目录名可推导 Redis key，不执行 `KEYS`。
+- 初始化信息以原子写入方式保存在 `<tempDir>/<uploadID>/meta.json`；清理任务先确认 Redis 会话已过期，再移除超过 TTL+jitter 的本地目录；已知目录名可推导 Redis key，不执行 `KEYS`。
 
-- [ ] 写测试：参数校验拒绝无效 MD5、非法 part count、负大小和超过 10,000 片上限的文件。
-- [ ] 写测试：状态服务只在文件存在时返回“已上传分片”，并在新分片完成后登记状态。
-- [ ] 写测试：30 分钟清理逻辑删除过期目录并保留未过期/近期活跃目录。
-- [ ] 写测试确认失败，再实现 Redis 状态适配器、配置默认值和清理 worker。
+- [x] 写测试：`TestValidateUploadMetadataRejectsInvalidValues` 拒绝无效 MD5、非法 part count、负大小和超过 10,000 片上限的文件。
+- [x] 写测试：`TestAvailableUploadedPartsIgnoresMissingFiles` 只返回本地分片文件确实存在的 Redis 分片记录。
+- [x] 写测试：`TestCleanupExpiredUploadDirs` 删除超过 24h 的目录并保留未过期/近期活跃目录；`TestCleanupDecisionPreservesLiveOrUnreadableSessions` 覆盖 Redis 会话保护。
+- [x] 写测试：`TestRandomizedUploadTTLStaysWithinWindow` 验证 TTL 在 24h 到 24h+5m 范围内。
+- [x] 写测试：`TestApplyUploadDefaultsUsesBoundedDefaults` 验证未配置时默认使用 5MiB 分片、10MiB 单片、10,000 片、24h TTL 和 30min 清理间隔。
+- [x] 确认测试先失败，再实现 Redis 状态适配器、配置默认值和清理 worker。
 - [ ] 提交 Task 2：`feat(upload): 上传状态续传与过期清理`。
 
 ### Task 3: 视频发布的 RPC 所有权与幂等性
