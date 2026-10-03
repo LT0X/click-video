@@ -23,6 +23,7 @@ import (
 
 const (
 	chatRPCTimestampMetadataKey = "x-chat-rpc-timestamp"
+	chatRPCTargetMetadataKey    = "x-chat-rpc-target"
 	chatRPCNonceMetadataKey     = "x-chat-rpc-nonce"
 	chatRPCSignatureMetadataKey = "x-chat-rpc-signature"
 	chatRPCAuthWindow           = 30 * time.Second
@@ -39,7 +40,7 @@ func newChatRPCReplayGuard() *chatRPCReplayGuard {
 	return &chatRPCReplayGuard{seen: make(map[string]time.Time)}
 }
 
-func (g *chatRPCReplayGuard) accept(nonce string, now time.Time) bool {
+func (g *chatRPCReplayGuard) accept(nonce string, expiresAt, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -54,7 +55,7 @@ func (g *chatRPCReplayGuard) accept(nonce string, now time.Time) bool {
 		}
 		g.nextPrune = now.Add(chatRPCAuthWindow)
 	}
-	g.seen[nonce] = now.Add(chatRPCAuthWindow)
+	g.seen[nonce] = expiresAt
 	return true
 }
 
@@ -78,13 +79,15 @@ func ResolveRPCToken(configuredToken, listenAddress string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(secret), nil
 }
 
-func chatRPCSignature(token, method, timestamp, nonce string, request proto.Message) (string, error) {
+func chatRPCSignature(token, method, target, timestamp, nonce string, request proto.Message) (string, error) {
 	requestBytes, err := (proto.MarshalOptions{Deterministic: true}).Marshal(request)
 	if err != nil {
 		return "", fmt.Errorf("序列化聊天节点 RPC 请求失败: %w", err)
 	}
 	mac := hmac.New(sha256.New, []byte(token))
 	_, _ = mac.Write([]byte(method))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(target))
 	_, _ = mac.Write([]byte{0})
 	_, _ = mac.Write([]byte(timestamp))
 	_, _ = mac.Write([]byte{0})
@@ -103,16 +106,17 @@ func newChatRPCNonce() (string, error) {
 }
 
 // chatRPCAuthUnaryInterceptor 使用共享密钥验证请求签名，避免在线路上发送密钥本身。
-func chatRPCAuthUnaryInterceptor(token string, replayGuard *chatRPCReplayGuard) grpc.UnaryServerInterceptor {
+func chatRPCAuthUnaryInterceptor(token, target string, replayGuard *chatRPCReplayGuard) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 		values, ok := metadata.FromIncomingContext(ctx)
 		if !ok {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 认证失败")
 		}
+		targetValue, targetOK := singleMetadataValue(values, chatRPCTargetMetadataKey)
 		timestampValue, timestampOK := singleMetadataValue(values, chatRPCTimestampMetadataKey)
 		nonce, nonceOK := singleMetadataValue(values, chatRPCNonceMetadataKey)
 		signature, signatureOK := singleMetadataValue(values, chatRPCSignatureMetadataKey)
-		if !timestampOK || !nonceOK || !signatureOK || strings.TrimSpace(token) == "" || len(nonce) != 48 {
+		if !targetOK || targetValue != target || !timestampOK || !nonceOK || !signatureOK || strings.TrimSpace(token) == "" || len(nonce) != 48 {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 认证失败")
 		}
 		nonceBytes, err := hex.DecodeString(nonce)
@@ -125,18 +129,19 @@ func chatRPCAuthUnaryInterceptor(token string, replayGuard *chatRPCReplayGuard) 
 		}
 		now := time.Now()
 		requestTime := time.UnixMilli(timestampMillis)
-		if requestTime.Before(now.Add(-chatRPCAuthWindow)) || requestTime.After(now.Add(chatRPCAuthWindow)) {
+		expiresAt := requestTime.Add(chatRPCAuthWindow)
+		if requestTime.Before(now.Add(-chatRPCAuthWindow)) || requestTime.After(now.Add(chatRPCAuthWindow)) || !now.Before(expiresAt) {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 请求已过期")
 		}
 		protobufRequest, ok := req.(proto.Message)
 		if !ok {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 请求类型无效")
 		}
-		expected, err := chatRPCSignature(token, info.FullMethod, timestampValue, nonce, protobufRequest)
+		expected, err := chatRPCSignature(token, info.FullMethod, targetValue, timestampValue, nonce, protobufRequest)
 		if err != nil || !hmac.Equal([]byte(expected), []byte(signature)) {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 认证失败")
 		}
-		if replayGuard == nil || !replayGuard.accept(nonce, now) {
+		if replayGuard == nil || !replayGuard.accept(nonce, expiresAt, now) {
 			return nil, status.Error(codes.Unauthenticated, "聊天节点 RPC 请求重复")
 		}
 		return handler(ctx, req)

@@ -16,15 +16,16 @@ import (
 
 func TestChatRPCAuthUnaryInterceptorRejectsInvalidRequests(t *testing.T) {
 	request := &chatpush.DeliveryRequest{EventID: "event-1", Content: "message"}
-	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", newChatRPCReplayGuard())
+	target := "gateway-a.internal:8014"
+	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, newChatRPCReplayGuard())
 	handler := func(context.Context, interface{}) (interface{}, error) {
 		return &chatpush.DeliveryResponse{Delivered: true}, nil
 	}
 
-	validValues := signedRPCMetadata(t, "expected-secret", request, time.Now(), "0123456789abcdef0123456789abcdef0123456789abcdef")
+	validValues := signedRPCMetadata(t, "expected-secret", target, request, time.Now(), "0123456789abcdef0123456789abcdef0123456789abcdef")
 	wrongSignature := validValues.Copy()
 	wrongSignature.Set(chatRPCSignatureMetadataKey, "invalid-signature")
-	staleValues := signedRPCMetadata(t, "expected-secret", request, time.Now().Add(-chatRPCAuthWindow-time.Second), "1123456789abcdef0123456789abcdef0123456789abcdef")
+	staleValues := signedRPCMetadata(t, "expected-secret", target, request, time.Now().Add(-chatRPCAuthWindow-time.Second), "1123456789abcdef0123456789abcdef0123456789abcdef")
 
 	for _, test := range []struct {
 		name   string
@@ -46,9 +47,10 @@ func TestChatRPCAuthUnaryInterceptorRejectsInvalidRequests(t *testing.T) {
 
 func TestChatRPCAuthUnaryInterceptorAllowsSignedRequestOnce(t *testing.T) {
 	request := &chatpush.DeliveryRequest{EventID: "event-2", Content: "signed message"}
-	values := signedRPCMetadata(t, "expected-secret", request, time.Now(), "2123456789abcdef0123456789abcdef0123456789abcdef")
+	target := "gateway-a.internal:8014"
+	values := signedRPCMetadata(t, "expected-secret", target, request, time.Now(), "2123456789abcdef0123456789abcdef0123456789abcdef")
 	ctx := metadata.NewIncomingContext(context.Background(), values)
-	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", newChatRPCReplayGuard())
+	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", target, newChatRPCReplayGuard())
 	called := 0
 	handler := func(context.Context, interface{}) (interface{}, error) {
 		called++
@@ -63,6 +65,32 @@ func TestChatRPCAuthUnaryInterceptorAllowsSignedRequestOnce(t *testing.T) {
 	}
 	if called != 1 {
 		t.Fatalf("handler calls = %d, want 1", called)
+	}
+}
+
+func TestChatRPCAuthUnaryInterceptorBindsRequestToTargetGateway(t *testing.T) {
+	request := &chatpush.DeliveryRequest{EventID: "event-3", Content: "targeted message"}
+	values := signedRPCMetadata(t, "expected-secret", "gateway-a.internal:8014", request, time.Now(), "3123456789abcdef0123456789abcdef0123456789abcdef")
+	ctx := metadata.NewIncomingContext(context.Background(), values)
+	interceptor := chatRPCAuthUnaryInterceptor("expected-secret", "gateway-b.internal:8014", newChatRPCReplayGuard())
+	_, err := interceptor(ctx, request, &grpc.UnaryServerInfo{FullMethod: chatpush.ChatPush_Deliver_FullMethodName}, func(context.Context, interface{}) (interface{}, error) {
+		t.Fatal("handler called for a request signed for another gateway")
+		return nil, nil
+	})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("interceptor error = %v, want unauthenticated", err)
+	}
+}
+
+func TestReplayGuardRetainsNonceUntilSignatureExpires(t *testing.T) {
+	now := time.Unix(100, 0)
+	guard := newChatRPCReplayGuard()
+	expiresAt := now.Add(2 * chatRPCAuthWindow)
+	if !guard.accept("nonce", expiresAt, now) {
+		t.Fatal("first nonce use was rejected")
+	}
+	if guard.accept("nonce", expiresAt, now.Add(chatRPCAuthWindow+time.Second)) {
+		t.Fatal("nonce was accepted again before the signed timestamp expired")
 	}
 }
 
@@ -90,14 +118,15 @@ func TestResolveRPCTokenGeneratesEphemeralSecretForLoopback(t *testing.T) {
 	}
 }
 
-func signedRPCMetadata(t *testing.T, token string, request *chatpush.DeliveryRequest, requestTime time.Time, nonce string) metadata.MD {
+func signedRPCMetadata(t *testing.T, token, target string, request *chatpush.DeliveryRequest, requestTime time.Time, nonce string) metadata.MD {
 	t.Helper()
 	timestamp := strconv.FormatInt(requestTime.UnixMilli(), 10)
-	signature, err := chatRPCSignature(token, chatpush.ChatPush_Deliver_FullMethodName, timestamp, nonce, request)
+	signature, err := chatRPCSignature(token, chatpush.ChatPush_Deliver_FullMethodName, target, timestamp, nonce, request)
 	if err != nil {
 		t.Fatalf("chatRPCSignature() error = %v", err)
 	}
 	return metadata.Pairs(
+		chatRPCTargetMetadataKey, target,
 		chatRPCTimestampMetadataKey, timestamp,
 		chatRPCNonceMetadataKey, nonce,
 		chatRPCSignatureMetadataKey, signature,

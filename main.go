@@ -67,7 +67,7 @@ func main() {
 	})
 	service.ConfigureChatPipeline(chatDispatcher, chatCache)
 	ws.ConfigureChat(chatRegistry, chatRoutes, chatDispatcher, config.System.Chat.AdvertiseAddress)
-	if _, err := chat.StartPushRPC(config.System.Chat.RPCListenAddress, chatRegistry, chatRPCToken); err != nil {
+	if _, err := chat.StartPushRPC(config.System.Chat.RPCListenAddress, config.System.Chat.AdvertiseAddress, chatRegistry, chatRPCToken); err != nil {
 		zap.L().Fatal("聊天节点 gRPC 推送服务启动失败", zap.Error(err))
 	}
 	go chatBuffer.Run(context.Background())

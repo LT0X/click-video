@@ -69,11 +69,12 @@ func (p *GRPCRemotePusher) Push(ctx context.Context, address string, msg Message
 	if err != nil {
 		return err
 	}
-	signature, err := chatRPCSignature(p.token, chatpush.ChatPush_Deliver_FullMethodName, timestamp, nonce, request)
+	signature, err := chatRPCSignature(p.token, chatpush.ChatPush_Deliver_FullMethodName, address, timestamp, nonce, request)
 	if err != nil {
 		return err
 	}
 	ctx = metadata.AppendToOutgoingContext(ctx,
+		chatRPCTargetMetadataKey, address,
 		chatRPCTimestampMetadataKey, timestamp,
 		chatRPCNonceMetadataKey, nonce,
 		chatRPCSignatureMetadataKey, signature,
@@ -115,7 +116,7 @@ func (p *GRPCRemotePusher) Close() error {
 	return firstErr
 }
 
-func StartPushRPC(address string, registry *Registry, token string) (func(), error) {
+func StartPushRPC(address, target string, registry *Registry, token string) (func(), error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("聊天节点 RPC 认证密钥未配置")
 	}
@@ -123,7 +124,7 @@ func StartPushRPC(address string, registry *Registry, token string) (func(), err
 	if err != nil {
 		return nil, fmt.Errorf("监听聊天节点 RPC 地址 %q 失败: %w", address, err)
 	}
-	server := grpc.NewServer(grpc.UnaryInterceptor(chatRPCAuthUnaryInterceptor(token, newChatRPCReplayGuard())))
+	server := grpc.NewServer(grpc.UnaryInterceptor(chatRPCAuthUnaryInterceptor(token, target, newChatRPCReplayGuard())))
 	chatpush.RegisterChatPushServer(server, NewGatewayPushServer(registry))
 	go func() {
 		if err := server.Serve(listener); err != nil {
