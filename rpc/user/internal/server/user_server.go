@@ -48,6 +48,11 @@ func (s *UserServer) SelectWorkCount(ctx context.Context, in *user.SelectWorkCou
 	return l.SelectWorkCount(in)
 }
 
+func (s *UserServer) IncrementWorkCount(ctx context.Context, in *user.IncrementWorkCountRequest) (*user.IncrementWorkCountResponse, error) {
+	l := logic.NewIncrementWorkCountLogic(ctx, s.svcCtx)
+	return l.IncrementWorkCount(in)
+}
+
 func (s *UserServer) SelectUserListByIDs(ctx context.Context, in *user.SelectUserListByIDsRequest) (*user.SelectUserListByIDsResponse, error) {
 	l := logic.NewSelectUserListByIDsLogic(ctx, s.svcCtx)
 	return l.SelectUserListByIDs(in)

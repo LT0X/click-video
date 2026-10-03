@@ -11,6 +11,7 @@ import (
 // 存文件名 然后灵活更换CDN域名
 type Video struct {
 	ID            uint64    `json:"id"`
+	UploadID      string    `gorm:"type:varchar(36);uniqueIndex:uk_video_upload_id;not null" json:"upload_id"`
 	AuthorID      uint64    `gorm:"not null;index" json:"author_id"`
 	PlayURL       string    `gorm:"type:varchar(255);not null" json:"play_url"`
 	CoverURL      string    `gorm:"type:varchar(255);not null" json:"cover_url"`

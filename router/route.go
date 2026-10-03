@@ -1,19 +1,59 @@
 package router
 
 import (
+	"douyin/config"
 	"douyin/handler"
 	"douyin/package/util"
 	"douyin/package/ws"
+	"path/filepath"
+	"strings"
+
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 )
 
-func InitRouter(app *fiber.App) {
+// ProtectUploadInternalFiles 禁止通过静态挂载点读取上传分片和合并临时文件。
+func ProtectUploadInternalFiles(app *fiber.App, staticPrefix, staticRoot, uploadTempDir string) {
+	deny := func(c *fiber.Ctx) error { return fiber.ErrNotFound }
+	prefix := strings.TrimRight(staticPrefix, "/")
+	protectedPaths := []string{"videos/.upload-merge"}
+	if staticRoot != "" && uploadTempDir != "" {
+		root, rootErr := filepath.Abs(staticRoot)
+		tempDir, tempErr := filepath.Abs(uploadTempDir)
+		if rootErr == nil && tempErr == nil {
+			relativePath, err := filepath.Rel(root, tempDir)
+			if err == nil && relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) && !filepath.IsAbs(relativePath) {
+				if relativePath == "." {
+					relativePath = ""
+				}
+				protectedPaths = append(protectedPaths, filepath.ToSlash(relativePath))
+			}
+		}
+	}
+	for _, relativePath := range protectedPaths {
+		relativePath = strings.Trim(relativePath, "/")
+		path := prefix
+		if relativePath != "" {
+			path += "/" + relativePath
+		}
+		app.All(path, deny)
+		app.All(path+"/*", deny)
+	}
+}
+
+func InitRouter(app *fiber.App, uploadHandler *handler.UploadHandler) {
 	// 允许所有跨域请求
 	//app.Use(cors.New())
-	app.Static("/video", "./douyinVideo",
+	ProtectUploadInternalFiles(app, "/video", config.System.HttpAddress.VideoAddress, config.System.Upload.TempDir)
+	app.Static("/video", config.System.HttpAddress.VideoAddress,
 		fiber.Static{ByteRange: true}) // 好像可以分块传输 但是客户端没啥用。
 	app.Static("/image", "./douyinImage") // 是可以用绝对路径
+	upload := app.Group("/api/upload")
+	{
+		upload.Post("/init", uploadHandler.Init)
+		upload.Post("/chunk", uploadHandler.Chunk)
+		upload.Post("/merge", uploadHandler.Merge)
+	}
 
 	api := app.Group("/douyin")
 	{

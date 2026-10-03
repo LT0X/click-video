@@ -99,6 +99,7 @@ require (
 )
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.0
 	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/bits-and-blooms/bloom/v3 v3.6.0
 	github.com/disintegration/imaging v1.6.2

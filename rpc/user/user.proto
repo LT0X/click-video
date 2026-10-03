@@ -58,6 +58,15 @@ message SelectWorkCountResponse{
   int64  Count = 1;
 }
 
+message IncrementWorkCountRequest {
+  uint64 UserID = 1;
+  uint64 VideoID = 2;
+}
+
+message IncrementWorkCountResponse {
+  bool Applied = 1;
+}
+
 message SelectUserListByIDsRequest{
   repeated uint64 userIDs = 1;
 }
@@ -117,6 +126,7 @@ service User {
   rpc SelectUserByName(SelectUserByNameRequest) returns(SelectUserByNameResponse);
   rpc SelectUserByID(SelectUserByIDRequest) returns(SelectUserByIDResponse);
   rpc SelectWorkCount(SelectWorkCountRequest) returns(SelectWorkCountResponse);
+  rpc IncrementWorkCount(IncrementWorkCountRequest) returns(IncrementWorkCountResponse);
   rpc SelectUserListByIDs(SelectUserListByIDsRequest) returns(SelectUserListByIDsResponse);
   rpc FavoriteVideo(FavoriteVideoRequest) returns(FavoriteVideoResponse);
   rpc ReserveFavoriteActionSequence(ReserveFavoriteActionSequenceRequest) returns(ReserveFavoriteActionSequenceResponse);
