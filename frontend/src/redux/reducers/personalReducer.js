@@ -1,3 +1,5 @@
+import { mergeChatMessages } from "../../utils/chatSocket";
+
 const initState = { info: {}, friendList: {}, messages: {}, chattingFriendId: 0 };
 const personalReducer = (state = initState, action) => {
   switch (action.type) {
@@ -15,6 +17,14 @@ const personalReducer = (state = initState, action) => {
       return {
         ...state,
         messages: { ...state.messages, [action.id]: action.messages },
+      };
+    case "APPEND_MESSAGE":
+      return {
+        ...state,
+        messages: {
+          ...state.messages,
+          [action.id]: mergeChatMessages(state.messages[action.id] || [], [action.message]),
+        },
       };
     case "CHANGE_CHATTING_FRIEND_ID":
       return {

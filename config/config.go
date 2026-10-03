@@ -47,6 +47,11 @@ type UploadConfig struct {
 	CleanupIntervalMinutes int    `mapstructure:"cleanupIntervalMinutes"`
 }
 
+type ChatConfig struct {
+	RPCListenAddress string `mapstructure:"rpcListenAddress"`
+	AdvertiseAddress string `mapstructure:"advertiseAddress"`
+}
+
 type RabbitMQ struct {
 	Host     string `mapstructure:"host"`
 	Port     string `mapstructure:"port"`
@@ -69,6 +74,8 @@ type SystemConfig struct {
 	UserRedis    Redis        `mapstructure:"userRedis"`
 	VideoRedis   Redis        `mapstructure:"videoRedis"`
 	CommentRedis Redis        `mapstructure:"commentRedis"`
+	ChatRedis    Redis        `mapstructure:"chatRedis"`
+	Chat         ChatConfig   `mapstructure:"chat"`
 	Upload       UploadConfig `mapstructure:"upload"`
 	MQ           RabbitMQ     `mapstructure:"rabbitmq"`
 	Mode         string       `mapstructure:"mode"`
@@ -120,6 +127,7 @@ func Init() {
 		log.Fatal("fatal error unmarshal config: ", err.Error())
 	}
 	applyUploadDefaults()
+	applyChatDefaults()
 
 	// 监视配置文件的变化 有变化就更改
 	viper.WatchConfig()
@@ -130,9 +138,34 @@ func Init() {
 			log.Println("fatal error unmarshal config: ", err.Error())
 		}
 		applyUploadDefaults()
+		applyChatDefaults()
 		log.Println(System.Qiniu.OssDomain)
 	})
 	log.Println("viper读取配置文件成功")
+}
+
+func applyChatDefaults() {
+	if System.ChatRedis.Host == "" {
+		System.ChatRedis.Host = System.UserRedis.Host
+	}
+	if System.ChatRedis.Port == "" {
+		System.ChatRedis.Port = System.UserRedis.Port
+	}
+	if System.ChatRedis.Password == "" {
+		System.ChatRedis.Password = System.UserRedis.Password
+	}
+	if System.ChatRedis.PoolSize <= 0 {
+		System.ChatRedis.PoolSize = System.UserRedis.PoolSize
+	}
+	if System.ChatRedis.Database == 0 {
+		System.ChatRedis.Database = 3
+	}
+	if System.Chat.RPCListenAddress == "" {
+		System.Chat.RPCListenAddress = "0.0.0.0:8014"
+	}
+	if System.Chat.AdvertiseAddress == "" {
+		System.Chat.AdvertiseAddress = "127.0.0.1:8014"
+	}
 }
 
 func applyUploadDefaults() {

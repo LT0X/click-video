@@ -4,66 +4,84 @@ import (
 	"context"
 	"douyin/database"
 	"douyin/model"
-	"douyin/rpc/contact/contact"
-	"strconv"
+	"douyin/package/chat"
+	"douyin/rpc/user/user"
+	"fmt"
+	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
 
 var (
-	// chatgpt
 	ChatGPTAvatar = "http://127.0.0.1:8000/static/avater/gpt.jpg"
 	ChatGPTName   = "ChatGPT"
 	ChatGPTID     = uint64(1)
 )
 
-func SendToChatGPT(userID uint64, content string) error {
-	// 先将消息写入数据库
+type ChatMessageSender func(context.Context, chat.Message) error
 
-	//err := database.CreateMessage(userID, ChatGPTID, content)
-	res, err := database.RPC.ContactRpc.CreateMessage(context.TODO(), &contact.CreateMessageRequest{
-		UserID:   userID,
-		ToUserID: ChatGPTID,
-		Content:  content,
-	})
-	if err != nil || res.Reply != 1 {
-		return err
-	}
+var chatSender struct {
+	sync.RWMutex
+	send ChatMessageSender
+}
 
+func ConfigureChatMessageSender(sender ChatMessageSender) {
+	chatSender.Lock()
+	chatSender.send = sender
+	chatSender.Unlock()
+}
+
+func currentChatMessageSender() ChatMessageSender {
+	chatSender.RLock()
+	sender := chatSender.send
+	chatSender.RUnlock()
+	return sender
+}
+
+func SendToChatGPT(userID uint64, content string) (chat.Message, error) {
+	sender := currentChatMessageSender()
+	msg, err := queueChatMessage(context.Background(), userID, ChatGPTID, content, sender)
 	if err != nil {
-		return err
+		return chat.Message{}, err
 	}
 	go requestToChatGPT(userID, content)
-	return nil
+	return msg, nil
 }
 
 func requestToChatGPT(userID uint64, content string) {
-	ans := RequestToSparkAPI(content)
-	if ans == "" {
+	answer := RequestToSparkAPI(content)
+	if answer == "" {
 		return
 	}
-
-	//err := database.CreateMessage(ChatGPTID, userID, ans)
-	res, err := database.RPC.ContactRpc.CreateMessage(context.TODO(), &contact.CreateMessageRequest{
-		UserID:   ChatGPTID,
-		ToUserID: userID,
-		Content:  ans,
-	})
-
-	if err != nil || res.Reply != 1 {
-		zap.L().Error(err.Error() + " reply" + strconv.FormatUint(res.Reply, 64))
+	sender := currentChatMessageSender()
+	if _, err := queueChatMessage(context.Background(), ChatGPTID, userID, answer, sender); err != nil {
+		zap.L().Error("AI 回复消息写入聊天缓冲失败", zap.Error(err))
 	}
 }
 
-// 将chatgpt注册为用户
-func RegisterChatGPT() {
-	user := &model.User{
-		ID:       ChatGPTID,
-		Username: ChatGPTName,
-		Avatar:   ChatGPTAvatar,
+func queueChatMessage(ctx context.Context, fromUserID, toUserID uint64, content string, sender ChatMessageSender) (chat.Message, error) {
+	if sender == nil {
+		return chat.Message{}, fmt.Errorf("AI 聊天消息缓冲服务未初始化")
 	}
-	_, err := database.CreateUser(user)
+	msg, err := chat.NewMessage(fromUserID, toUserID, content, time.Now())
 	if err != nil {
-		zap.L().Info("ChatGPT已写入user表")
+		return chat.Message{}, err
+	}
+	if err := sender(ctx, msg); err != nil {
+		return chat.Message{}, err
+	}
+	return msg, nil
+}
+
+func RegisterChatGPT() {
+	chatUser := &model.User{
+		ID: ChatGPTID, Username: ChatGPTName, Avatar: ChatGPTAvatar,
+	}
+	_, err := database.RPC.UserRpc.CreateUser(context.Background(), &user.CreateUserRequest{
+		User: model.TransformUserInfo(chatUser),
+	})
+	if err != nil {
+		zap.L().Info("ChatGPT 用户已存在或注册 RPC 失败", zap.Error(err))
 	}
 }

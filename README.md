@@ -13,7 +13,7 @@ Go 1.20 | HTTP 入口：`douyin`（端口 8010）
 
 - **API 网关 + 三微服务架构** — GoFiber 主服务作为 API 网关与业务编排层，通过 etcd 服务发现调用 user.rpc / video.rpc / contact.rpc 三个 gRPC 微服务，职责按业务领域划分
 - **RabbitMQ 异步解耦三大高频写** — 点赞、评论、关注全部走 fanout exchange + 持久化消息 + 手动 ACK，主流程立即返回，消费者后台落库并更新缓存
-- **Redis 三库分片 + 冷热分离** — 用户/视频/评论分别落到 Redis db 0/1/2；固定信息用 String(JSON)、频变计数用 Hash，Pipeline 批量执行降低 RTT
+- **Redis 四个逻辑库 + 冷热分离** — 用户/视频/评论/聊天分别落到 Redis db 0/1/2/3；固定信息用 String(JSON)、频变计数用 Hash，Pipeline 批量执行降低 RTT
 - **三重缓存防护** — 布隆过滤器拦截非法 ID 防穿透、SetNX+Lua 分布式锁防击穿、基础 TTL + 随机偏移防雪崩
 - **MySQL 主从 + 强制读主** — 基于 dbresolver 的读写分离骨架，评论列表等"写后立即读"场景用 `dbresolver.Write` 强制走主库规避复制延迟
 - **go-zero MapReduce 并发聚合** — 点赞列表等"N 视频 → N 作者"聚合查询用 `mr.MapReduce` 并发执行，`orderMp` 解决乱序回填
@@ -51,7 +51,7 @@ graph TB
     subgraph STORE["存储层"]
         direction LR
         MYSQL["MySQL 主从<br/><small>v_clip 库</small>"]
-        REDIS["Redis 三库分片<br/><small>db0 用户 / db1 视频 / db2 评论</small>"]
+        REDIS["Redis 四个逻辑库<br/><small>db0 用户 / db1 视频 / db2 评论 / db3 聊天</small>"]
     end
 
     subgraph INFRA["基础设施层"]
@@ -173,13 +173,14 @@ flowchart TD
 
 ### 缓存层 — package/cache/
 
-**三库分片策略**（`cache/init.go`）：
+**按业务域隔离 Redis 逻辑库**（`cache/init.go`）：
 
 | 客户端 | db | 用途 | 数据结构 |
 |--------|----|----|---------|
 | UserRedisClient | 0 | 用户信息、关注/粉丝/点赞集合 | String(JSON) + Hash(计数) + Set(集合) |
 | VideoRedisClient | 1 | 视频信息、发布集合、视频点赞计数/版本/脏集合/访问统计 | String(JSON) + Hash(计数) + Set/ZSet |
 | CommentRedisClient | 2 | 评论列表 | ZSet(score=时间戳) |
+| ChatRedisClient | 3 | WebSocket 路由、消息 Stream、聊天历史与好友最新消息缓存 | String + Stream + ZSet |
 
 **冷热分离设计**（`cache/user.go`、`cache/video.go`）：将信息拆为两部分——固定信息（用户名/头像/签名、视频 URL/标题）用 String 存 JSON，变更频率低、整体读写；计数信息（关注数/粉丝数/点赞数、评论数）用 Hash 存，频繁变动、支持单字段更新。注释明确说明："若直接存储在 hash 里 会频繁变动性能问题"。
 
@@ -472,6 +473,12 @@ upload:                 # 本地视频分片上传
 commentRedis:          # db 2 评论域
   db: 2
 
+chatRedis:             # db 3 聊天域，host/port/password/poolSize 默认复用 userRedis
+  db: 3
+chat:
+  rpcListenAddress: "0.0.0.0:8014"
+  advertiseAddress: "127.0.0.1:8014" # 多节点部署要为每个网关配置其他节点可访问的地址
+
 rabbitmq:
   host: 192.168.169.128
   port: 5673
@@ -507,6 +514,14 @@ ContactRpc:            # gRPC 服务发现（etcd）
 | `comment:{videoID}` | ZSet | 评论列表（score=时间戳） |
 | `lock:comment:{videoID}` | String | 分布式锁 |
 | `login_counter:{username}` | String | 登录限流计数 |
+| `chat:route:{userID}` | String | 在线网关地址及连接租约，30 秒过期；前端每 10 秒 ping 续期（DB3） |
+| `chat:message:buffer` | Stream | 待落库消息；contact.rpc 批量成功后 ACK 并删除，消费组 `chat-message-writers`（DB3） |
+| `chat:message:dead_letter` | Stream | 无法解析的消息原文和错误原因，人工排查/重放用（DB3） |
+| `chat:history:{minUserID}:{maxUserID}` | ZSet | 会话最近最多 50 条，只有未截断历史才允许缓存命中，1 小时加随机偏移（DB3） |
+| `chat:history:{minUserID}:{maxUserID}:complete` | String | 标记历史 ZSet 完整；与历史缓存同 TTL（DB3） |
+| `chat:message_newest:{userID}:{toUserID}` | ZSet | 单向好友列表的最近消息，10 分钟加随机偏移（DB3） |
+
+聊天 WebSocket 地址为既有 `/douyin/message/ws`，浏览器用 query token 鉴权；`ping` 每 10 秒续期 Redis 路由，服务端 30 秒无心跳关闭连接。普通消息、AI 提问和 AI 回复先写入 Redis Stream，再按 50 条或 250 毫秒批量调用 contact.rpc 写入消息表；contact.rpc 通过 `message.event_id` 唯一索引保证消费重试幂等，只有 DB 写入成功后才确认 Stream。部署升级前执行 `config/mysql/migrations/20261003_chat_message_event_id.sql`。为了让 Redis Stream 能跨进程重启恢复，Redis 必须启用 AOF；本仓库 compose 使用 `appendonly yes` 和 `appendfsync everysec`。多网关部署时，每个实例的 `chat.advertiseAddress` 必须填写其他实例可访问的地址，`chat.rpcListenAddress` 是本机监听地址；默认 `127.0.0.1:8014` 仅适用于单机开发。
 
 `video_info_count:{id}` 的点赞字段在脏数据待刷盘期间不设 TTL；刷盘成功且该视频没有新脏写入后，按基础 TTL 加随机偏移过期。计数读取先 Pipeline 查 Hash，miss 用 video 表值返回并异步以 `HSETNX` 回填，避免覆盖并发增量。计数事件携带版本和事务内计算的绝对计数；Redis 的 `favorite_count_version` 不过期，即使计数 Hash 淘汰也能拒绝迟到事件，并可从新事件的绝对计数恢复计数缓存。网关先向 user.rpc 申请数据库动作序号，序号在用户/视频状态行上事务递增，不依赖 Redis 是否保留缓存数据；user.rpc 消费者按已应用序号拒绝迟到动作。事务 Outbox 同时重试用户缓存失效和视频计数事件发布。
 
@@ -533,7 +548,7 @@ ContactRpc:            # gRPC 服务发现（etcd）
 | 微服务框架 | go-zero v1.4.3（zrpc + etcd 服务发现） |
 | ORM | GORM v1.25 + dbresolver（读写分离） |
 | 数据库 | MySQL 8.0（主从 + ngram 全文索引） |
-| 缓存 | Redis 6.x（三库分片 + Pipeline + 布隆过滤器） |
+| 缓存 | Redis 6.x（四域逻辑库 + Pipeline + 布隆过滤器 + Stream） |
 | 消息队列 | RabbitMQ 3.x（fanout exchange + 持久化 + 手动 ACK） |
 | 服务发现 | etcd 3.5 |
 | 鉴权 | JWT（HS256，golang-jwt/jwt v5） |
