@@ -1,10 +1,15 @@
 package metrics
 
 import (
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestRegistryExposesAllFamiliesAndBoundsLabels(t *testing.T) {
@@ -75,5 +80,57 @@ func TestRegistryExposesAllFamiliesAndBoundsLabels(t *testing.T) {
 		if strings.Contains(body, unboundedValue) {
 			t.Errorf("unbounded label value %q leaked into metrics", unboundedValue)
 		}
+	}
+}
+
+func TestMetricsHTTPServerServesPrometheusEndpoint(t *testing.T) {
+	registry := NewRegistry()
+	registry.ObserveFavoriteRequest("favorite", "success", 10*time.Millisecond)
+	server := NewHTTPServer("127.0.0.1:0", registry.Handler())
+	if server.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("ReadHeaderTimeout=%s, want 5s", server.ReadHeaderTimeout)
+	}
+
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("/metrics returned HTTP %d", response.Code)
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "text/plain") {
+		t.Fatalf("unexpected Prometheus Content-Type %q", contentType)
+	}
+	if !strings.Contains(response.Body.String(), "click_video_favorite_requests_total") {
+		t.Fatal("/metrics did not include registered metric names")
+	}
+	notFound := httptest.NewRecorder()
+	server.Handler.ServeHTTP(notFound, httptest.NewRequest(http.MethodGet, "/debug", nil))
+	if notFound.Code != http.StatusNotFound {
+		t.Fatalf("/debug returned HTTP %d, want 404", notFound.Code)
+	}
+}
+
+func TestMetricsHTTPServerBindFailureIsLoggedAndNonFatal(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve test port: %v", err)
+	}
+	defer listener.Close()
+
+	core, observed := observer.New(zap.ErrorLevel)
+	restore := zap.ReplaceGlobals(zap.New(core))
+	defer restore()
+	startedAt := time.Now()
+	server := StartHTTPServer(listener.Addr().String(), "test-service", http.NotFoundHandler())
+	if server == nil || time.Since(startedAt) > time.Second {
+		t.Fatal("metrics listener failure blocked startup")
+	}
+	defer server.Close()
+
+	deadline := time.Now().Add(time.Second)
+	for observed.FilterMessage("Prometheus 指标 HTTP 服务监听失败").Len() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if observed.FilterMessage("Prometheus 指标 HTTP 服务监听失败").Len() != 1 {
+		t.Fatal("metrics listener failure was not logged")
 	}
 }

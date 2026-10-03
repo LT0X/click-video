@@ -44,3 +44,11 @@ func TestApplyChatDefaultsUsesIsolatedRedisAndRPCAddresses(t *testing.T) {
 		t.Fatal("chat RPC token was not loaded from CLICK_VIDEO_CHAT_RPC_TOKEN")
 	}
 }
+func TestMonitoringMetricsAddressDefaultsToLoopback(t *testing.T) {
+	if got := (MonitoringConfig{}).ListenAddressOrDefault(); got != "127.0.0.1:9100" {
+		t.Fatalf("empty monitoring address resolved to %q", got)
+	}
+	if got := (MonitoringConfig{ListenAddress: "0.0.0.0:9100"}).ListenAddressOrDefault(); got != "0.0.0.0:9100" {
+		t.Fatalf("configured monitoring address changed to %q", got)
+	}
+}

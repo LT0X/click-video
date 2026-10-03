@@ -1,10 +1,25 @@
 package config
 
-import "github.com/zeromicro/go-zero/zrpc"
+import (
+	"strings"
+
+	"github.com/zeromicro/go-zero/zrpc"
+)
 
 type Config struct {
 	zrpc.RpcServerConf
-	DBList DBListConf
+	DBList          DBListConf
+	MetricsListenOn string
+}
+
+const defaultMetricsListenAddress = "127.0.0.1:9113"
+
+// MetricsListenAddress 返回配置地址；未配置时限制在本机 loopback。
+func (c Config) MetricsListenAddress() string {
+	if address := strings.TrimSpace(c.MetricsListenOn); address != "" {
+		return address
+	}
+	return defaultMetricsListenAddress
 }
 
 type DBListConf struct {

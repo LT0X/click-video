@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	appconfig "douyin/config"
+	"douyin/package/metrics"
 	eventmq "douyin/package/mq"
 	"douyin/package/util"
 	"douyin/rpc/video/internal/cache"
@@ -32,6 +33,7 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	metrics.StartHTTPServer(c.MetricsListenAddress(), "video.rpc", metrics.Default.Handler())
 	svcCtx := svc.NewServiceContext(c)
 	cache.InitRedis(svcCtx)
 
