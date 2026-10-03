@@ -3,6 +3,7 @@ package logic
 import (
 	"context"
 	"douyin/response"
+	"douyin/rpc/video/internal/cache"
 	"douyin/rpc/video/internal/model"
 	"time"
 
@@ -62,6 +63,16 @@ func (l *SelectFeedVideoByTopicLogic) SelectFeedVideoByTopic(in *video.SelectFee
 
 	if err != nil {
 		return nil, err
+	}
+	favoriteCountRows := make([]*model.Video, len(res))
+	for i, item := range res {
+		favoriteCountRows[i] = &model.Video{ID: item.VideoID, FavoriteCount: item.VideoFavoriteCount}
+	}
+	if err := cache.LoadFavoriteCounts(l.ctx, favoriteCountRows); err != nil {
+		return nil, err
+	}
+	for i := range res {
+		res[i].VideoFavoriteCount = favoriteCountRows[i].FavoriteCount
 	}
 	data := model.TransformVideoData(res)
 	return &video.SelectFeedVideoByTopicResponse{

@@ -14,27 +14,29 @@ import (
 )
 
 type (
-	CreateUserRequest                   = user.CreateUserRequest
-	CreateUserResponse                  = user.CreateUserResponse
-	FavoriteVideoRequest                = user.FavoriteVideoRequest
-	FavoriteVideoResponse               = user.FavoriteVideoResponse
-	Request                             = user.Request
-	Response                            = user.Response
-	SearchUserRequest                   = user.SearchUserRequest
-	SearchUserResponse                  = user.SearchUserResponse
-	SelectFavoriteVideoByUserIDRequest  = user.SelectFavoriteVideoByUserIDRequest
-	SelectFavoriteVideoByUserIDResponse = user.SelectFavoriteVideoByUserIDResponse
-	SelectUserByIDRequest               = user.SelectUserByIDRequest
-	SelectUserByIDResponse              = user.SelectUserByIDResponse
-	SelectUserByNameRequest             = user.SelectUserByNameRequest
-	SelectUserByNameResponse            = user.SelectUserByNameResponse
-	SelectUserListByIDsRequest          = user.SelectUserListByIDsRequest
-	SelectUserListByIDsResponse         = user.SelectUserListByIDsResponse
-	SelectWorkCountRequest              = user.SelectWorkCountRequest
-	SelectWorkCountResponse             = user.SelectWorkCountResponse
-	UpdateUserInfoRequest               = user.UpdateUserInfoRequest
-	UpdateUserInfoResponse              = user.UpdateUserInfoResponse
-	UserInfo                            = user.UserInfo
+	CreateUserRequest                     = user.CreateUserRequest
+	CreateUserResponse                    = user.CreateUserResponse
+	FavoriteVideoRequest                  = user.FavoriteVideoRequest
+	FavoriteVideoResponse                 = user.FavoriteVideoResponse
+	ReserveFavoriteActionSequenceRequest  = user.ReserveFavoriteActionSequenceRequest
+	ReserveFavoriteActionSequenceResponse = user.ReserveFavoriteActionSequenceResponse
+	Request                               = user.Request
+	Response                              = user.Response
+	SearchUserRequest                     = user.SearchUserRequest
+	SearchUserResponse                    = user.SearchUserResponse
+	SelectFavoriteVideoByUserIDRequest    = user.SelectFavoriteVideoByUserIDRequest
+	SelectFavoriteVideoByUserIDResponse   = user.SelectFavoriteVideoByUserIDResponse
+	SelectUserByIDRequest                 = user.SelectUserByIDRequest
+	SelectUserByIDResponse                = user.SelectUserByIDResponse
+	SelectUserByNameRequest               = user.SelectUserByNameRequest
+	SelectUserByNameResponse              = user.SelectUserByNameResponse
+	SelectUserListByIDsRequest            = user.SelectUserListByIDsRequest
+	SelectUserListByIDsResponse           = user.SelectUserListByIDsResponse
+	SelectWorkCountRequest                = user.SelectWorkCountRequest
+	SelectWorkCountResponse               = user.SelectWorkCountResponse
+	UpdateUserInfoRequest                 = user.UpdateUserInfoRequest
+	UpdateUserInfoResponse                = user.UpdateUserInfoResponse
+	UserInfo                              = user.UserInfo
 
 	User interface {
 		Ping(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error)
@@ -44,6 +46,7 @@ type (
 		SelectWorkCount(ctx context.Context, in *SelectWorkCountRequest, opts ...grpc.CallOption) (*SelectWorkCountResponse, error)
 		SelectUserListByIDs(ctx context.Context, in *SelectUserListByIDsRequest, opts ...grpc.CallOption) (*SelectUserListByIDsResponse, error)
 		FavoriteVideo(ctx context.Context, in *FavoriteVideoRequest, opts ...grpc.CallOption) (*FavoriteVideoResponse, error)
+		ReserveFavoriteActionSequence(ctx context.Context, in *ReserveFavoriteActionSequenceRequest, opts ...grpc.CallOption) (*ReserveFavoriteActionSequenceResponse, error)
 		SelectFavoriteVideoByUserID(ctx context.Context, in *SelectFavoriteVideoByUserIDRequest, opts ...grpc.CallOption) (*SelectFavoriteVideoByUserIDResponse, error)
 		UpdateUserInfo(ctx context.Context, in *UpdateUserInfoRequest, opts ...grpc.CallOption) (*UpdateUserInfoResponse, error)
 		SearchUser(ctx context.Context, in *SearchUserRequest, opts ...grpc.CallOption) (*SearchUserResponse, error)
@@ -93,6 +96,11 @@ func (m *defaultUser) SelectUserListByIDs(ctx context.Context, in *SelectUserLis
 func (m *defaultUser) FavoriteVideo(ctx context.Context, in *FavoriteVideoRequest, opts ...grpc.CallOption) (*FavoriteVideoResponse, error) {
 	client := user.NewUserClient(m.cli.Conn())
 	return client.FavoriteVideo(ctx, in, opts...)
+}
+
+func (m *defaultUser) ReserveFavoriteActionSequence(ctx context.Context, in *ReserveFavoriteActionSequenceRequest, opts ...grpc.CallOption) (*ReserveFavoriteActionSequenceResponse, error) {
+	client := user.NewUserClient(m.cli.Conn())
+	return client.ReserveFavoriteActionSequence(ctx, in, opts...)
 }
 
 func (m *defaultUser) SelectFavoriteVideoByUserID(ctx context.Context, in *SelectFavoriteVideoByUserIDRequest, opts ...grpc.CallOption) (*SelectFavoriteVideoByUserIDResponse, error) {

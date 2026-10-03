@@ -55,7 +55,7 @@ graph TB
     end
 
     subgraph INFRA["基础设施层"]
-        MQ["RabbitMQ<br/><small>3 个 fanout exchange</small>"]
+        MQ["RabbitMQ<br/><small>4 个 fanout exchange</small>"]
         ETCD["etcd<br/><small>服务注册发现</small>"]
         OSS["七牛云 OSS<br/><small>对象存储</small>"]
         LLM["讯飞星火<br/><small>AI 对话</small>"]
@@ -98,20 +98,26 @@ flowchart LR
     CLIENT["客户端"] -->|"POST /favorite/action"| HANDLER["Handler"]
     HANDLER --> SVC["Service"]
     SVC -->|"立即返回"| HANDLER
-    SVC -->|"SendFavoriteMessage"| EXCHANGE["RabbitMQ<br/>favorite exchange"]
-    EXCHANGE --> CONSUMER["消费者 goroutine"]
-    CONSUMER -->|"FavoriteVideo"| DAO["database 层"]
-    DAO -->|"事务更新"| MYSQL[("MySQL")]
-    DAO -->|"删除缓存"| REDIS[("Redis")]
-    CONSUMER -->|"Ack"| EXCHANGE
+    SVC -->|"VideoRpc 查询作者 ID"| VIDEO["video.rpc"]
+    SVC -->|"JSON 持久消息"| ACTION["RabbitMQ<br/>favorite"]
+    ACTION --> USER["user.rpc 消费者"]
+    USER -->|"本地事务：favorite + user 计数"| USERDB[("MySQL")]
+    USER -->|"事务 Outbox + publisher confirm"| COUNTER["RabbitMQ<br/>favorite_counter"]
+    COUNTER --> VCONSUMER["video.rpc 消费者"]
+    VCONSUMER -->|"HIncrBy + dirty Set"| REDIS[("Redis DB1")]
+    VCONSUMER -->|"定时 CASE WHEN 刷盘"| VIDEODB[("video 表")]
+    USER -->|"favorite COUNT 快照"| COUNTER
+    VCONSUMER -->|"手动 ACK"| COUNTER
 
     style CLIENT fill:#e8f4f8,stroke:#4a90d9
     style HANDLER fill:#fff3e0,stroke:#e6a23c
     style SVC fill:#fff3e0,stroke:#e6a23c
-    style EXCHANGE fill:#f3e5f5,stroke:#9b59b6
-    style CONSUMER fill:#f3e5f5,stroke:#9b59b6
-    style DAO fill:#e8f5e9,stroke:#67c23a
-    style MYSQL fill:#fce4ec,stroke:#e74c3c
+    style ACTION fill:#f3e5f5,stroke:#9b59b6
+    style COUNTER fill:#f3e5f5,stroke:#9b59b6
+    style USER fill:#e8f5e9,stroke:#67c23a
+    style VCONSUMER fill:#e8f5e9,stroke:#67c23a
+    style USERDB fill:#fce4ec,stroke:#e74c3c
+    style VIDEODB fill:#fce4ec,stroke:#e74c3c
     style REDIS fill:#fce4ec,stroke:#e74c3c
 ```
 
@@ -148,7 +154,7 @@ flowchart TD
 
 **读写分离骨架**（`database/init.go`）：基于 `gorm.io/plugin/dbresolver` 的实现已被注释保留，设计意图是 Sources（主库）处理写、Replicas（从库）处理读、`RandomPolicy` 负载均衡。当前所有读写都走主库，但 `GetCommentsByVideoIDFromMaster` 仍保留 `dbresolver.Write` 子句作为强制读主的标记。
 
-**事务模式**：所有核心写操作都在 GORM 事务内完成多表更新。以点赞为例（`database/favorite.go`）：查重 → 增删 favorite 表 → 更新 video.favorite_count → 更新作者 user.total_favorited → 更新点赞者 user.favorite_count → 删除相关缓存，五步在一个事务内原子完成。
+**事务模式**：点赞动作由 `user.rpc` 消费持久化 MQ 消息，在本服务事务中修改 favorite 关系、点赞者 `favorite_count`、作者 `total_favorited`、视频计数版本和 Outbox；Outbox 发布器重试清除用户缓存，并等待 RabbitMQ publisher confirm 后标记已发布。视频计数由 `video.rpc` 消费版本化事件后更新 Redis Hash，后台再批量刷入本服务的 video 表。两项计数通过消息最终一致，不再在同一个事务跨服务更新表；Outbox 解决数据库提交后缓存清理或消息发布失败导致的丢失。
 
 **关键 SQL 优化**：
 
@@ -171,8 +177,8 @@ flowchart TD
 
 | 客户端 | db | 用途 | 数据结构 |
 |--------|----|----|---------|
-| UserRedisClient | 0 | 用户信息、关注/粉丝集合 | String(JSON) + Hash(计数) + Set(集合) |
-| VideoRedisClient | 1 | 视频信息、点赞集合、发布集合 | String(JSON) + Hash(计数) + Set(集合) |
+| UserRedisClient | 0 | 用户信息、关注/粉丝/点赞集合 | String(JSON) + Hash(计数) + Set(集合) |
+| VideoRedisClient | 1 | 视频信息、发布集合、视频点赞计数/版本/脏集合/访问统计 | String(JSON) + Hash(计数) + Set/ZSet |
 | CommentRedisClient | 2 | 评论列表 | ZSet(score=时间戳) |
 
 **冷热分离设计**（`cache/user.go`、`cache/video.go`）：将信息拆为两部分——固定信息（用户名/头像/签名、视频 URL/标题）用 String 存 JSON，变更频率低、整体读写；计数信息（关注数/粉丝数/点赞数、评论数）用 Hash 存，频繁变动、支持单字段更新。注释明确说明："若直接存储在 hash 里 会频繁变动性能问题"。
@@ -231,10 +237,10 @@ end
 
 **特点**：
 
-- **共享数据库 + 主服务编排**：三个 RPC 服务共用同一个 MySQL 库 `v_clip`，服务间无直接调用，所有跨域逻辑由主 API 服务编排。例如 Feed 流需要作者信息，video.rpc 直接 SQL 右连接 user 表，而非调用 user.rpc。
+- **共享数据库 + 服务边界**：三个 RPC 服务共用 MySQL 库 `v_clip`，但 favorite/user 表由 user.rpc 维护，video 表由 video.rpc 维护。跨服务数据通过 RPC/MQ 传递；Feed 联查仍是现有的共享库读取路径。
 - **NonBlock 客户端**：主服务用 `zrpc.MustNewClient` + `NonBlock: true` 创建客户端，允许 RPC 服务晚于主服务启动。
 - **开发模式反射**：`c.Mode == DevMode || TestMode` 时注册 gRPC reflection，便于 `grpcurl` 调试。
-- **Logic 层事务模式**：多表写操作用 GORM 事务保证一致性，例如 `favorite_video_logic.go` 在事务内完成 favorite 表 + video 计数 + 作者计数 + 点赞者计数四步更新。
+- **点赞边界**：`user.rpc` 只写 favorite 与 user 表；`video.rpc` 只写 video 表。网关通过 video RPC 读取作者 ID，点赞事件与计数事件经 RabbitMQ fanout 解耦。
 - **迁移未完成**：部分查询仍走主服务的本地 `database` 包（如 `SelectUserByID`、`SelectUserListByIDs`），RPC 化尚未全部完成。
 
 ### Service 层 — service/
@@ -275,25 +281,32 @@ Handler 层职责统一：**参数解析 + 鉴权 + 调用 service + 包装 resp
 
 **单生产者 Channel + 多消费者 Channel**：全局共享 `produceChannel` 复用发送，每个消费者独立 Channel 实现隔离。`init.go` 启动 goroutine 监听 `NotifyClose`，Channel 异常关闭时每 3 秒尝试重建。
 
-**三个 fanout exchange**：
+**fanout exchange**：
 
 | Exchange | 消息格式 | 消费者调用 | 业务 |
 |----------|----------|------------|------|
 | comment | JSON 序列化的 `model.Comment` | `VideoRpc.CommentAdd` | 评论发布 |
-| favorite | `userID:videoID:flag`（1赞/-1取消） | `database.FavoriteVideo` | 点赞 |
+| favorite | JSON `FavoriteActionEvent`（event/user/author/video ID、delta） | `user.rpc` 本地事务 | favorite 关系和 user 计数 |
+| favorite_counter | JSON `FavoriteCountEvent`（delta 或 snapshot） | `video.rpc` 计数消费者 | Redis 原子计数、视频表刷盘和快照校准 |
 | relation | `userID:toUserID:t`（1关注/-1取关） | `ContactRpc.Follow` | 关注 |
 
-**消费者三件套**：
+点赞专用消费者使用持久队列 `favorite_user_rpc` / `favorite_video_rpc`，`Qos(50, 0, false)` 限流并手动 ACK。格式错误、字段非法或引用不存在用户的永久无效消息会记录并确认丢弃；可重试的处理错误会 Nack 并重新入队。RabbitMQ 发布使用 publisher confirm；user.rpc 的计数事件从 MySQL Outbox 发布，避免提交后进程退出造成事件丢失。RabbitMQ 配置复用根目录 `config/config.yaml` 的 `rabbitmq` 段；独立启动 RPC 时可用 `CLICK_VIDEO_CONFIG` 指定配置文件路径。
 
-1. `channel.Qos(2, 0, false)` 设置 prefetch count=2，防止一个消费者被压垮
-2. 声明无名、独占、非持久化队列（`QueueDeclare("", false, false, true, ...)`），进程退出时自动删除
-3. 手动 ACK（`Consume(..., false, ...)` + `message.Ack(false)`），保证消费成功才确认
+已有数据库升级时，先暂停网关点赞写入，让旧版 `user.rpc` 和 `video.rpc` 消费完 `favorite_user_rpc` / `favorite_video_rpc` 持久队列，再执行 `config/mysql/migrations/20261003_favorite_outbox.sql`。迁移会创建用户域计数状态、数据库动作序号和事务 Outbox，并初始化视频计数基线；随后先启动新版 `user.rpc`、再恢复网关写入。user.rpc 仍能读取缺少动作序号的遗留点赞消息，并在事务锁内分配序号。全新库由 `config/mysql/douyin.sql` 创建这些表。
+
+点赞计数维护流程：
+
+- `user.rpc` 在同一事务更新点赞关系、计数和 Outbox；每个视频维护单调递增的 `count_version`。发布器收到 broker confirm 后标记 Outbox，失败时可重发同一事件。
+- `video.rpc` 每次消费 delta 时用 Lua 比较版本，并在连续事件时 `HINCRBY`；若事件乱序或缓存缺失则用事件携带的绝对计数校准。Lua 同时写入脏视频 Set；event ID 去重 7 天，长期版本 Hash 防止旧事件覆盖新值。
+- 每 10 秒最多 `SPopN` 1000 个脏 ID，Pipeline 读 Hash，再以一条 `CASE WHEN` SQL 刷入 video 表；失败的 ID 放回 Set。
+- `user.rpc` 每 30 分钟在同一数据库快照中按 favorite 表 `COUNT(*) GROUP BY video_id` 并读取版本状态，再发送权威快照；状态表保留归零视频，快照只会覆盖不比当前版本旧的 Redis 值，随后由刷盘任务更新 video 表。
+- `video.rpc` 按分钟用 ZSet 统计访问量；上一分钟访问量超过 1000 的视频标记为热点，并延长固定信息与计数缓存 TTL。
 
 **特点**：
 
-- **持久化消息**：所有生产者用 `amqp.Persistent`，避免 MQ 重启丢消息。
-- **毒消息处理差异**：`relation.go` 解析失败时 `Ack(true)` 批量确认后 `continue`，避免毒消息阻塞；`comment.go` 解析失败时 `break` 退出 goroutine，会导致消费者静默停止（潜在 bug）。
-- **死信队列缺失**：`favorite.go` 有 TODO 注释提到应配置最大消费次数与死信队列，目前未实现，消费失败的消息 ACK 后丢弃。
+- **持久化消息**：RabbitMQ 点赞动作和计数事件均使用 durable exchange/queue 与 `amqp.Persistent` 消息。
+- **毒消息处理差异**：点赞消费者会确认并丢弃格式非法的消息；`comment.go` 解析失败时仍会 `break` 退出 goroutine，P2 缓存一致性专项会修复。
+- **重试边界**：点赞消费者对业务错误 Nack 重入队，当前没有最大重试次数和死信队列。
 
 ### LLM 集成 — package/llm/
 
@@ -462,11 +475,18 @@ ContactRpc:            # gRPC 服务发现（etcd）
 | `video_info_count:{id}` | Hash | 视频计数（点赞/评论） |
 | `follow_id:{id}` | Set | 关注集合 |
 | `follower_id:{id}` | Set | 粉丝集合 |
-| `favorite_id:{id}` | Set | 点赞视频集合 |
+| `favorite_id:{id}` | Set | 点赞视频集合（DB0） |
 | `publish_id:{id}` | Set | 发布视频集合 |
+| `favorite_count_dirty_video_ids` | Set | video.rpc 待刷盘计数的视频 ID（DB1） |
+| `favorite_count_event:{eventID}` | String | delta 去重标记，7 天加随机偏移过期（DB1） |
+| `favorite_count_version` | Hash(videoID → version) | 视频计数已应用版本，长期保留以拒绝迟到的旧事件（DB1） |
+| `video_access_minute:{YYYYMMDDHHmm}` | ZSet | 每分钟视频访问数，score 为访问次数（DB1） |
+| `hot_video:{id}` | String | 热点视频标记，5 分钟加随机偏移过期（DB1） |
 | `comment:{videoID}` | ZSet | 评论列表（score=时间戳） |
 | `lock:comment:{videoID}` | String | 分布式锁 |
 | `login_counter:{username}` | String | 登录限流计数 |
+
+`video_info_count:{id}` 的点赞字段在脏数据待刷盘期间不设 TTL；刷盘成功且该视频没有新脏写入后，按基础 TTL 加随机偏移过期。计数读取先 Pipeline 查 Hash，miss 用 video 表值返回并异步以 `HSETNX` 回填，避免覆盖并发增量。计数事件携带版本和事务内计算的绝对计数；Redis 的 `favorite_count_version` 不过期，即使计数 Hash 淘汰也能拒绝迟到事件，并可从新事件的绝对计数恢复计数缓存。网关先向 user.rpc 申请数据库动作序号，序号在用户/视频状态行上事务递增，不依赖 Redis 是否保留缓存数据；user.rpc 消费者按已应用序号拒绝迟到动作。事务 Outbox 同时重试用户缓存失效和视频计数事件发布。
 
 ### 关键常量
 

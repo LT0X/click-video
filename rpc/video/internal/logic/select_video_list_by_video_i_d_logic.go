@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"douyin/rpc/video/internal/cache"
 	"douyin/rpc/video/internal/model"
 
 	"douyin/rpc/video/internal/svc"
@@ -30,6 +31,9 @@ func (l *SelectVideoListByVideoIDLogic) SelectVideoListByVideoID(in *video.Selec
 	// 这里按照id倒叙 其实id就能保证时间顺序了
 	err := l.svcCtx.DBList.Mysql.Where("id IN (?)", in.VideoIDList).Order("id desc").Find(&res).Error
 	if err != nil {
+		return nil, err
+	}
+	if err := cache.LoadFavoriteCounts(l.ctx, res); err != nil {
 		return nil, err
 	}
 	return &video.SelectVideoListByVideoIDResponse{

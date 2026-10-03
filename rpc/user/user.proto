@@ -75,6 +75,14 @@ message FavoriteVideoResponse{
    int64 reply = 1;
 }
 
+message ReserveFavoriteActionSequenceRequest {
+  uint64 UserID = 1;
+  uint64 VideoID = 2;
+}
+message ReserveFavoriteActionSequenceResponse {
+  uint64 Sequence = 1;
+}
+
 message SelectFavoriteVideoByUserIDRequest{
   //命名是应该USerID
   uint64 UserID = 1;
@@ -111,6 +119,7 @@ service User {
   rpc SelectWorkCount(SelectWorkCountRequest) returns(SelectWorkCountResponse);
   rpc SelectUserListByIDs(SelectUserListByIDsRequest) returns(SelectUserListByIDsResponse);
   rpc FavoriteVideo(FavoriteVideoRequest) returns(FavoriteVideoResponse);
+  rpc ReserveFavoriteActionSequence(ReserveFavoriteActionSequenceRequest) returns(ReserveFavoriteActionSequenceResponse);
   rpc SelectFavoriteVideoByUserID(SelectFavoriteVideoByUserIDRequest) returns(SelectFavoriteVideoByUserIDResponse);
   rpc UpdateUserInfo(UpdateUserInfoRequest) returns(UpdateUserInfoResponse);
   rpc SearchUser(SearchUserRequest) returns(SearchUserResponse);
