@@ -1,6 +1,7 @@
 package router
 
 import (
+	"douyin/config"
 	"douyin/handler"
 	"douyin/package/util"
 	"douyin/package/ws"
@@ -8,12 +9,18 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-func InitRouter(app *fiber.App) {
+func InitRouter(app *fiber.App, uploadHandler *handler.UploadHandler) {
 	// 允许所有跨域请求
 	//app.Use(cors.New())
-	app.Static("/video", "./douyinVideo",
+	app.Static("/video", config.System.HttpAddress.VideoAddress,
 		fiber.Static{ByteRange: true}) // 好像可以分块传输 但是客户端没啥用。
 	app.Static("/image", "./douyinImage") // 是可以用绝对路径
+	upload := app.Group("/api/upload")
+	{
+		upload.Post("/init", uploadHandler.Init)
+		upload.Post("/chunk", uploadHandler.Chunk)
+		upload.Post("/merge", uploadHandler.Merge)
+	}
 
 	api := app.Group("/douyin")
 	{

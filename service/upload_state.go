@@ -21,6 +21,7 @@ import (
 const (
 	defaultUploadTTL    = 24 * time.Hour
 	defaultUploadJitter = 5 * time.Minute
+	defaultUploadMD5TTL = 7 * 24 * time.Hour
 	defaultMaxParts     = 10000
 
 	uploadMetaKeyPrefix  = "upload:"
@@ -28,7 +29,7 @@ const (
 	uploadMD5KeyPrefix   = "upload_md5:"
 )
 
-var errUploadSessionNotFound = errors.New("上传任务不存在或已过期")
+var ErrUploadSessionNotFound = errors.New("上传任务不存在或已过期")
 
 // UploadState 在 video Redis 中保存断点续传状态和秒传映射。
 type UploadState struct {
@@ -79,7 +80,7 @@ func (s *UploadState) Get(uploadID string) (upload.Metadata, error) {
 		return upload.Metadata{}, fmt.Errorf("读取上传任务状态失败: %w", err)
 	}
 	if len(fields) == 0 {
-		return upload.Metadata{}, errUploadSessionNotFound
+		return upload.Metadata{}, ErrUploadSessionNotFound
 	}
 	meta, err := parseUploadMetadata(uploadID, fields)
 	if err != nil {
@@ -145,11 +146,36 @@ func (s *UploadState) SetStatus(uploadID, status string) error {
 	return nil
 }
 
+func (s *UploadState) SetVideoID(uploadID string, videoID uint64) error {
+	if !upload.ValidUploadID(uploadID) || videoID == 0 {
+		return errors.New("上传 ID 或视频 ID 不合法")
+	}
+	pipe := s.client.Pipeline()
+	pipe.HSet(uploadMetaKey(uploadID), "video_id", videoID)
+	ttl := randomizedUploadTTL(s.ttlBase, s.ttlJitter)
+	pipe.Expire(uploadMetaKey(uploadID), ttl)
+	pipe.Expire(uploadPartsKey(uploadID), ttl)
+	if _, err := pipe.Exec(); err != nil {
+		return fmt.Errorf("保存上传任务视频 ID 失败: %w", err)
+	}
+	return nil
+}
+
+func (s *UploadState) RemoveParts(uploadID string) error {
+	if !upload.ValidUploadID(uploadID) {
+		return errors.New("上传 ID 不合法")
+	}
+	if err := s.client.Del(uploadPartsKey(uploadID)).Err(); err != nil {
+		return fmt.Errorf("清理上传分片状态失败: %w", err)
+	}
+	return nil
+}
+
 func (s *UploadState) SetVideoByMD5(fileMD5 string, videoID uint64) error {
 	if !upload.ValidMD5(fileMD5) || videoID == 0 {
 		return errors.New("秒传映射参数不合法")
 	}
-	if err := s.client.Set(uploadMD5Key(fileMD5), videoID, randomizedUploadTTL(s.ttlBase, s.ttlJitter)).Err(); err != nil {
+	if err := s.client.Set(uploadMD5Key(fileMD5), videoID, randomizedUploadTTL(defaultUploadMD5TTL, s.ttlJitter)).Err(); err != nil {
 		return fmt.Errorf("保存秒传映射失败: %w", err)
 	}
 	return nil
@@ -259,7 +285,7 @@ func uploadDirectoryCanBeRemoved(now time.Time, manager *upload.Manager, uploadI
 		// Redis 仍保存会话（包括 merging 状态）时，本地分片仍属于活跃任务。
 		return false, nil
 	}
-	if !errors.Is(err, errUploadSessionNotFound) {
+	if !errors.Is(err, ErrUploadSessionNotFound) {
 		return false, err
 	}
 	return manager.UploadExpired(uploadID, now, ttl)

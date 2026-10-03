@@ -113,7 +113,7 @@ func TestCleanupDecisionPreservesLiveOrUnreadableSessions(t *testing.T) {
 	if got, err := uploadDirectoryCanBeRemoved(time.Now(), manager, oldID, 24*time.Hour, lookupUnavailable); err == nil || got {
 		t.Fatalf("unreadable session cleanup = %v, %v; want false, error", got, err)
 	}
-	lookupMissing := func(string) error { return errUploadSessionNotFound }
+	lookupMissing := func(string) error { return ErrUploadSessionNotFound }
 	if got, err := uploadDirectoryCanBeRemoved(time.Now(), manager, recentID, 24*time.Hour, lookupMissing); err != nil || got {
 		t.Fatalf("recent orphan cleanup = %v, %v; want false, nil", got, err)
 	}

@@ -74,7 +74,14 @@ func (service *PublisService) PublishAction(userID uint64, buf *bytes.Buffer) (*
 	if created == nil || created.VideoID == 0 {
 		return nil, errors.New("video.rpc 返回了无效的视频 ID")
 	}
-	cache.VideoIDBloomFilter.AddString(strconv.FormatUint(created.VideoID, 10))
+	if cache.VideoIDBloomFilter != nil {
+		cache.VideoIDBloomFilter.AddString(strconv.FormatUint(created.VideoID, 10))
+	}
+	if cache.UserRedisClient != nil && cache.VideoRedisClient != nil {
+		if err := cache.PublishVideo(userID, created.VideoID); err != nil {
+			zap.L().Warn("清除发布列表缓存失败", zap.Uint64("video_id", created.VideoID), zap.Error(err))
+		}
+	}
 	_, err = database.RPC.UserRpc.IncrementWorkCount(context.Background(), &user.IncrementWorkCountRequest{
 		UserID:  userID,
 		VideoID: created.VideoID,

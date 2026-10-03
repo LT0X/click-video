@@ -16,13 +16,13 @@ import (
 )
 
 func UploadVideo(file []byte, fileName string) (string, string, error) {
-	err := os.MkdirAll(config.System.HttpAddress.VideoAddress, os.ModePerm)
+	playDir := filepath.Join(config.System.HttpAddress.VideoAddress, "playurl")
+	err := os.MkdirAll(playDir, 0o750)
 	if err != nil {
 		zap.L().Error(err.Error())
 		return "", "", err
 	}
-	// 还得有个变量是宿主机ip
-	outputFilePath := filepath.Join("C:\\work\\GoWord\\v1-clip\\DikTok\\douyinVideo\\playurl", fileName)
+	outputFilePath := filepath.Join(playDir, fileName)
 	outputFile, err := os.Create(outputFilePath)
 	if err != nil {
 		zap.L().Error(err.Error())
@@ -39,11 +39,16 @@ func UploadVideo(file []byte, fileName string) (string, string, error) {
 	u1, err := uuid.NewV4()
 	if err != nil {
 		zap.L().Error(err.Error())
+		return "", "", err
 	}
-	coverUrl, err := GetSnapshot(outputFilePath, u1.String(), 1)
+	coverDir := filepath.Join(config.System.HttpAddress.VideoAddress, "coverurl")
+	coverPath := filepath.Join(coverDir, u1.String()+".png")
+	_, err = GetSnapshot(outputFilePath, coverPath, 1)
 	if err != nil {
 		zap.L().Error(err.Error())
+		return "", "", err
 	}
+	coverUrl := "http://127.0.0.1:8000/static/coverurl/" + u1.String() + ".png"
 
 	return fileName, coverUrl, nil
 }
