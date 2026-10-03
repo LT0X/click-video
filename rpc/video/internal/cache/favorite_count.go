@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"douyin/package/constant"
+	"douyin/package/metrics"
 	"douyin/package/mq"
 	"douyin/rpc/video/internal/model"
 
@@ -153,6 +154,10 @@ func LoadFavoriteCounts(ctx context.Context, videos []*model.Video) error {
 	if len(videos) == 0 {
 		return nil
 	}
+	startedAt := time.Now()
+	defer func() {
+		metrics.Default.ObserveFavoriteCountLookup(time.Since(startedAt))
+	}()
 	pipe := VideoRedisClient.Pipeline()
 	commands := make([]*redis.StringCmd, len(videos))
 	for i, video := range videos {
@@ -165,17 +170,17 @@ func LoadFavoriteCounts(ctx context.Context, videos []*model.Video) error {
 
 	misses := make([]*model.Video, 0)
 	for i, command := range commands {
-		count, err := strconv.ParseInt(command.Val(), 10, 64)
-		if command.Err() == nil && err == nil {
+		count, found, outcome := recordFavoriteCountCacheAccess(metrics.Default, command.Val(), command.Err())
+		if found {
 			videos[i].FavoriteCount = count
 			continue
 		}
-		if command.Err() == redis.Nil {
+		if outcome == "miss" {
 			misses = append(misses, videos[i])
 			continue
 		}
 		if command.Err() != nil {
-			zap.L().Warn("解析视频点赞缓存失败，使用数据库值", zap.Uint64("video_id", videos[i].ID), zap.Error(command.Err()))
+			zap.L().Warn("读取视频点赞缓存失败，使用数据库值", zap.Uint64("video_id", videos[i].ID), zap.Error(command.Err()))
 			continue
 		}
 		zap.L().Warn("视频点赞缓存格式错误，使用数据库值", zap.Uint64("video_id", videos[i].ID), zap.String("value", command.Val()))
@@ -191,6 +196,24 @@ func LoadFavoriteCounts(ctx context.Context, videos []*model.Video) error {
 		zap.L().Warn("记录视频访问频次失败", zap.Error(err))
 	}
 	return nil
+}
+
+func recordFavoriteCountCacheAccess(registry *metrics.Registry, value string, commandErr error) (int64, bool, string) {
+	if commandErr == redis.Nil {
+		registry.ObserveFavoriteCountCacheAccess("miss")
+		return 0, false, "miss"
+	}
+	if commandErr != nil {
+		registry.ObserveFavoriteCountCacheAccess("error")
+		return 0, false, "error"
+	}
+	count, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		registry.ObserveFavoriteCountCacheAccess("error")
+		return 0, false, "error"
+	}
+	registry.ObserveFavoriteCountCacheAccess("hit")
+	return count, true, "hit"
 }
 
 func backfillFavoriteCounts(videos []*model.Video) {
