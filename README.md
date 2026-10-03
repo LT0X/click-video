@@ -351,9 +351,7 @@ Handler 层职责统一：**参数解析 + 鉴权 + 调用 service + 包装 resp
 
 ### WebSocket 即时消息 — package/ws/
 
-基于 `gofiber/contrib/websocket`，用 `\n` 分隔的文本协议：`get` 拉历史、`{content}\npost` 发消息。路由挂载前先 `websocket.IsWebSocketUpgrade` 升级检查。
-
-**当前实现不完整**：`post` 分支只有注释没有实现，且未维护在线用户连接表（无法做"发给对应的在线好友"），属于半成品。
+基于 `gofiber/contrib/websocket`，地址为既有 `/douyin/message/ws`。连接表由 `sync.RWMutex` 与本机 map 管理；`post` 消息先进入 Redis Stream，再异步批量落库，并按 Redis 路由表执行本机直推或跨节点 RPC 推送。接收端离线时仍先持久化消息，供后续历史查询。浏览器每 10 秒发送 `ping` 续期 30 秒路由租约，服务端超时会关闭连接。历史消息与好友列表最近消息使用 Redis ZSet 缓存，详情见下方 Redis Key 及聊天配置说明。
 
 ***
 
@@ -485,6 +483,9 @@ chat:
   advertiseAddress: "127.0.0.1:8014" # 多节点部署要为每个网关配置其他节点可访问的地址
   rpcToken: "" # 多节点通过环境变量 CLICK_VIDEO_CHAT_RPC_TOKEN 注入，不要提交密钥
 
+monitoring:
+  listenAddress: "127.0.0.1:9100" # 网关 Prometheus 指标端点
+
 rabbitmq:
   host: 192.168.169.128
   port: 5673
@@ -497,18 +498,63 @@ ContactRpc:            # gRPC 服务发现（etcd）
 
 前端分片大小固定为 5 MiB，Redis 上传状态存放在 `videoRedis`（DB1）。`upload:{uploadID}` Hash 和 `upload_parts:{uploadID}` Set 使用 24 小时基础 TTL 加 `ttlJitterSeconds` 随机偏移；`upload_md5:{userID}:{fileMD5}` String 秒传映射按作者隔离，使用 7 天基础 TTL 加相同随机偏移。`publicBaseURL` 是浏览器可访问的 API/媒体服务基地址，播放与封面 URL 都使用它，避免前后端不同源时请求发往前端服务器；如果部署使用同源反向代理，可留空并由相对路径路由。分片接口用 query 传 `upload_id`、`part_number`、`size`，并通过 `token` 请求头鉴权；`init` 和 `merge` 请求体为 JSON。
 
+### Prometheus 监控
+
+网关、`user.rpc` 和 `video.rpc` 各自提供独立的 `GET /metrics` 端点，指标只保存在对应进程内，由 Prometheus 按实例抓取并聚合。默认监听地址均为 loopback：网关 `127.0.0.1:9100`（`monitoring.listenAddress`）、`user.rpc` `127.0.0.1:9112`（`MetricsListenOn`）、`video.rpc` `127.0.0.1:9113`（`MetricsListenOn`）；`contact.rpc` 不新增 metrics 端点。监听器只提供 `/metrics`，不承载业务 API。若 Prometheus 在其他主机或容器中运行，将对应地址改为可达的私网地址，并用防火墙限制访问；不要直接暴露到公网。
+
+Prometheus 可按下面的目标抓取。若 Prometheus 与服务运行在不同网络命名空间，targets 应填写 Prometheus 可访问的服务地址，并将服务监听地址绑定到受防火墙保护的私网网卡。
+
+```yaml
+scrape_configs:
+  - job_name: click-video-gateway
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+  - job_name: click-video-user-rpc
+    static_configs:
+      - targets: ["127.0.0.1:9112"]
+  - job_name: click-video-video-rpc
+    static_configs:
+      - targets: ["127.0.0.1:9113"]
+```
+
+采集的指标包括：
+
+- `click_video_favorite_requests_total{action,result}` 和 `click_video_favorite_request_duration_seconds`：点赞/取消点赞请求数、结果与耗时；有限标签值为 `action=favorite|unfavorite|other`、`result=success|error|other`。
+- `click_video_favorite_count_lookup_duration_seconds` 和 `click_video_favorite_count_cache_access_total{result}`：`video.rpc` 批量查点赞计数 Hash 的耗时，以及字段级 `hit|miss|error` 结果。
+- `click_video_chat_history_requests_total{source,result}`、`click_video_chat_history_request_duration_seconds` 和 `click_video_chat_history_cache_access_total{result}`：聊天历史端到端请求结果/耗时、响应来源及缓存 `hit|miss|error`。
+- `click_video_rabbitmq_queue_messages{queue}`：网关每 5 秒采样的队列积压；固定队列为 `favorite_user_rpc`、`favorite_video_rpc`、`cache_invalidation_gateway`、`comment_writer`、`comment_retry_1s`、`comment_dead_letter`。
+- `click_video_rabbitmq_queue_inspection_errors_total{queue}`：队列采样失败次数；失败不会把最近一次成功的积压值改成零。
+- `click_video_rabbitmq_consumer_lag_seconds{queue}` 和 `click_video_rabbitmq_consumer_messages_missing_timestamp_total{queue}`：消费者开始处理时距初始发布时间的延迟，以及缺少发布时间戳、无法计算延迟的旧消息数。新发布消息会补充 UTC timestamp；未来时间戳不计入延迟。
+
+标签只使用固定动作、结果和队列名，不包含用户 ID、视频 ID 或错误文本。可用下列 PromQL 查看点赞成功 QPS、点赞耗时 P95，以及点赞计数缓存命中率：
+
+```promql
+sum by (action) (rate(click_video_favorite_requests_total{result="success"}[1m]))
+```
+
+```promql
+histogram_quantile(0.95, sum by (le, action) (rate(click_video_favorite_request_duration_seconds_bucket[5m])))
+```
+
+```promql
+sum(rate(click_video_favorite_count_cache_access_total{result="hit"}[5m]))
+/ clamp_min(sum(rate(click_video_favorite_count_cache_access_total{result=~"hit|miss"}[5m])), 1e-9)
+```
+
+聊天历史缓存命中率可将上一条查询中的指标替换为 `click_video_chat_history_cache_access_total`。该比率按 hit/(hit+miss) 计算，错误单独观察；请求错误率可用点赞请求 `result="error"` 的速率除以所有点赞请求速率。项目不维护额外 Redis 指标 Key。
+
 ### Redis Key 命名规范
 
 | 前缀 | 结构 | 说明 |
 |------|------|------|
-| `user_info:{id}` | String(JSON) | 用户固定信息 |
-| `user_info_count:{id}` | Hash | 用户计数（关注/粉丝/点赞/被赞/作品） |
-| `video_info:{id}` | String(JSON) | 视频固定信息 |
-| `video_info_count:{id}` | Hash | 视频计数（点赞/评论） |
-| `follow_id:{id}` | Set | 关注集合 |
-| `follower_id:{id}` | Set | 粉丝集合 |
+| `user_info:{id}` | String(JSON) | 用户固定信息（DB0） |
+| `user_info_count:{id}` | Hash | 用户计数（关注/粉丝/点赞/被赞/作品，DB0） |
+| `video_info:{id}` | String(JSON) | 视频固定信息（DB1） |
+| `video_info_count:{id}` | Hash | 视频计数（点赞/评论，DB1） |
+| `follow_id:{id}` | Set | 关注集合（DB0） |
+| `follower_id:{id}` | Set | 粉丝集合（DB0） |
 | `favorite_id:{id}` | Set | 点赞视频集合（DB0） |
-| `publish_id:{id}` | Set | 发布视频集合 |
+| `publish_id:{id}` | Set | 发布视频集合（DB0） |
 | `favorite_count_dirty_video_ids` | Set | video.rpc 待刷盘计数的视频 ID（DB1） |
 | `favorite_count_event:{eventID}` | String | delta 去重标记，7 天加随机偏移过期（DB1） |
 | `favorite_count_version` | Hash(videoID → version) | 视频计数已应用版本，长期保留以拒绝迟到的旧事件（DB1） |
@@ -517,9 +563,9 @@ ContactRpc:            # gRPC 服务发现（etcd）
 | `upload:{uploadID}` | Hash | 分片上传元数据和状态，24 小时加 0–5 分钟随机偏移（DB1） |
 | `upload_parts:{uploadID}` | Set | 已成功落盘的分片序号，续传时与本地文件一起校验（DB1） |
 | `upload_md5:{userID}:{fileMD5}` | String | 作者范围内文件 MD5 到 video ID 的秒传映射，7 天加随机偏移（DB1） |
-| `comment:{videoID}` | ZSet | 评论列表（score=时间戳） |
-| `lock:comment:{videoID}` | String | 分布式锁 |
-| `login_counter:{username}` | String | 登录限流计数 |
+| `comment:{videoID}` | ZSet | 评论列表（score=时间戳，DB2） |
+| `lock:comment:{videoID}` | String | 评论查询分布式锁（DB2） |
+| `login_counter:{username}` | String | 登录限流计数（DB0） |
 | `chat:route:{userID}` | String | 在线网关地址及连接租约，30 秒过期；前端每 10 秒 ping 续期（DB3） |
 | `chat:rpc:nonce:{target}:{nonce}` | String | 节点推送 HMAC 签名 nonce 的跨实例去重记录，SETNX 写入并保留到签名过期（最长约 60 秒，DB3） |
 | `chat:message:buffer` | Stream | 待落库消息；contact.rpc 批量成功后 ACK 并删除，消费组 `chat-message-writers`（DB3） |
