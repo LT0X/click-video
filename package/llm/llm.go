@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 /**
@@ -37,16 +38,21 @@ func RequestToSparkAPI(content string) string {
 	//握手并建立websocket 连接
 	conn, resp, err := d.Dial(assembleAuthUrl1(hostUrl, apiKey, apiSecret), nil)
 	if err != nil {
-		panic(readResp(resp) + err.Error())
+		zap.L().Error("连接星火 WebSocket 失败", zap.String("response", readResp(resp)), zap.Error(err))
 		return ""
-	} else if resp.StatusCode != 101 {
-		panic(readResp(resp) + err.Error())
 	}
+	if resp == nil || resp.StatusCode != 101 {
+		zap.L().Error("星火 WebSocket 握手失败", zap.String("response", readResp(resp)))
+		return ""
+	}
+	defer conn.Close()
 
 	go func() {
 
 		data := genParams1(appid, content)
-		conn.WriteJSON(data)
+		if err := conn.WriteJSON(data); err != nil {
+			zap.L().Warn("写入星火 WebSocket 请求失败", zap.Error(err))
+		}
 
 	}()
 
@@ -55,47 +61,75 @@ func RequestToSparkAPI(content string) string {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			fmt.Println("read message error:", err)
+			zap.L().Warn("读取星火 WebSocket 响应失败", zap.Error(err))
 			break
 		}
 
 		var data map[string]interface{}
 		err1 := json.Unmarshal(msg, &data)
 		if err1 != nil {
-			fmt.Println("Error parsing JSON:", err)
-			return ""
+			zap.L().Warn("解析星火 WebSocket 响应失败", zap.Error(err1))
+			return answer
 		}
-		fmt.Println(string(msg))
-		//解析数据
-		payload := data["payload"].(map[string]interface{})
-		choices := payload["choices"].(map[string]interface{})
-		header := data["header"].(map[string]interface{})
-		code := header["code"].(float64)
-
-		if code != 0 {
-			fmt.Println(data["payload"])
-			return ""
+		status, chunk, parseErr := parseSparkResponse(data)
+		if parseErr != nil {
+			zap.L().Warn("解析星火响应字段失败", zap.Error(parseErr))
+			return answer
 		}
-		status := choices["status"].(float64)
-		fmt.Println(status)
-		text := choices["text"].([]interface{})
-		content := text[0].(map[string]interface{})["content"].(string)
-		if status != 2 {
-			answer += content
-		} else {
-			fmt.Println("收到最终结果")
-			answer += content
-			usage := payload["usage"].(map[string]interface{})
-			temp := usage["text"].(map[string]interface{})
-			totalTokens := temp["total_tokens"].(float64)
-			fmt.Println("total_tokens:", totalTokens)
-			conn.Close()
+		answer += chunk
+		if status == 2 {
 			break
 		}
 
 	}
 	//输出返回结果
 	return answer
+}
+
+func parseSparkResponse(data map[string]interface{}) (float64, string, error) {
+	header, ok := data["header"].(map[string]interface{})
+	if !ok {
+		return 0, "", fmt.Errorf("缺少 header 对象")
+	}
+	code, ok := header["code"].(float64)
+	if !ok {
+		return 0, "", fmt.Errorf("缺少有效的 header.code")
+	}
+	if code != 0 {
+		return 0, "", fmt.Errorf("星火接口返回错误码: %v", code)
+	}
+	payload, ok := data["payload"].(map[string]interface{})
+	if !ok {
+		return 0, "", fmt.Errorf("缺少 payload 对象")
+	}
+	choices, ok := payload["choices"].(map[string]interface{})
+	if !ok {
+		return 0, "", fmt.Errorf("缺少 choices 对象")
+	}
+	status, ok := choices["status"].(float64)
+	if !ok {
+		return 0, "", fmt.Errorf("缺少有效的 choices.status")
+	}
+	texts, ok := choices["text"].([]interface{})
+	if !ok {
+		return 0, "", fmt.Errorf("缺少 choices.text 数组")
+	}
+	if len(texts) == 0 {
+		return status, "", nil
+	}
+	item, ok := texts[0].(map[string]interface{})
+	if !ok {
+		return 0, "", fmt.Errorf("choices.text[0] 格式无效")
+	}
+	content, ok := item["content"].(string)
+	if !ok {
+		// Spark 最后一帧可以只有结束状态而没有 content。
+		if status == 2 {
+			return status, "", nil
+		}
+		return 0, "", fmt.Errorf("choices.text[0].content 格式无效")
+	}
+	return status, content, nil
 }
 
 // 生成参数
@@ -172,7 +206,7 @@ func readResp(resp *http.Response) string {
 	}
 	b, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		panic(err)
+		return fmt.Sprintf("读取响应体失败: %v", err)
 	}
 	return fmt.Sprintf("code=%d,body=%s", resp.StatusCode, string(b))
 }
