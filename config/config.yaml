@@ -16,6 +16,7 @@ httpAddress:
 
 upload:
   tempDir: "./douyinVideo/upload/tmp"
+  publicBaseURL: "http://127.0.0.1:8010" # 前端可访问的 API/媒体服务基地址
   partSize: 5242880
   maxChunkSize: 10485760
   maxUploadSize: 52428800000

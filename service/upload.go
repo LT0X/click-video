@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"douyin/package/upload"
 	"douyin/package/cache"
+	"douyin/package/upload"
 	"douyin/rpc/user/user"
 	"douyin/rpc/video/video"
 
@@ -47,8 +47,9 @@ type UploadMergeResult struct {
 }
 
 type UploadServiceConfig struct {
-	Upload   upload.Config
-	CoverDir string
+	Upload        upload.Config
+	CoverDir      string
+	PublicBaseURL string
 }
 
 type UploadSessionStore interface {
@@ -58,8 +59,8 @@ type UploadSessionStore interface {
 	UploadedParts(string) ([]int, error)
 	SetStatus(string, string) error
 	SetVideoID(string, uint64) error
-	SetVideoByMD5(string, uint64) error
-	VideoByMD5(string) (uint64, bool, error)
+	SetVideoByMD5(uint64, string, uint64) error
+	VideoByMD5(uint64, string) (uint64, bool, error)
 	RemoveParts(string) error
 }
 
@@ -121,7 +122,7 @@ func (s *VideoUploadService) Init(ctx context.Context, userID uint64, req Upload
 		return UploadInitResult{UploadID: existing.UploadID, UploadedParts: available}, nil
 	}
 
-	videoID, exists, err := s.state.VideoByMD5(meta.FileMD5)
+	videoID, exists, err := s.state.VideoByMD5(userID, meta.FileMD5)
 	if err != nil {
 		return UploadInitResult{}, err
 	}
@@ -196,7 +197,7 @@ func (s *VideoUploadService) Merge(ctx context.Context, userID uint64, uploadID,
 		if meta.VideoID == 0 {
 			return UploadMergeResult{}, errors.New("已完成上传缺少视频 ID")
 		}
-		return UploadMergeResult{VideoID: meta.VideoID, PlayURL: uploadPlayURL(uploadID)}, nil
+		return UploadMergeResult{VideoID: meta.VideoID, PlayURL: s.mediaURL(uploadPlayURL(uploadID))}, nil
 	}
 	if meta.Status != upload.StatusUploading && meta.Status != upload.StatusMerging {
 		return UploadMergeResult{}, errors.New("上传任务当前状态不允许合并")
@@ -227,7 +228,7 @@ func (s *VideoUploadService) Merge(ctx context.Context, userID uint64, uploadID,
 	if s.rpc.CreateVideo == nil || s.rpc.IncrementWorkCount == nil {
 		return UploadMergeResult{}, errors.New("视频发布 RPC 未初始化")
 	}
-	playURL := uploadPlayURL(uploadID)
+	playURL := s.mediaURL(uploadPlayURL(uploadID))
 	created, err := s.rpc.CreateVideo(ctx, &video.CreateVideoRequest{
 		UploadID: uploadID,
 		VideoID: &video.VideoInfo{
@@ -259,7 +260,7 @@ func (s *VideoUploadService) Merge(ctx context.Context, userID uint64, uploadID,
 	if err := s.state.SetVideoID(uploadID, created.VideoID); err != nil {
 		return UploadMergeResult{}, err
 	}
-	if err := s.state.SetVideoByMD5(meta.FileMD5, created.VideoID); err != nil {
+	if err := s.state.SetVideoByMD5(userID, meta.FileMD5, created.VideoID); err != nil {
 		return UploadMergeResult{}, err
 	}
 	if err := s.state.SetStatus(uploadID, upload.StatusComplete); err != nil {
@@ -284,7 +285,7 @@ func (s *VideoUploadService) extractCover(videoID uint64, uploadID, videoPath, p
 		zap.L().Error("提取视频封面失败", zap.String("upload_id", uploadID), zap.Error(err))
 		return
 	}
-	coverURL := "/video/covers/" + imageName
+	coverURL := s.mediaURL("/video/covers/" + imageName)
 	if _, err := s.rpc.UpdateVideoURL(context.Background(), &video.UpdateVideoURLRequest{
 		VideoID: videoID, PlayURL: playURL, CoverURl: coverURL,
 	}); err != nil {
@@ -314,4 +315,12 @@ func expectedUploadPartSize(meta upload.Metadata, partNumber int, partSize int64
 
 func uploadPlayURL(uploadID string) string {
 	return "/video/videos/" + uploadID + ".mp4"
+}
+
+func (s *VideoUploadService) mediaURL(path string) string {
+	baseURL := strings.TrimRight(strings.TrimSpace(s.config.PublicBaseURL), "/")
+	if baseURL == "" {
+		return path
+	}
+	return baseURL + path
 }

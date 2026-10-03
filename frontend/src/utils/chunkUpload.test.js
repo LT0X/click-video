@@ -150,3 +150,34 @@ test("同时上传的分片不超过三路", async () => {
 
   expect(peak).toBe(3);
 });
+
+test("等待其他并发请求结束后才向调用方返回失败", async () => {
+  let releaseSlowRequests;
+  const slowRequests = new Promise((resolve) => { releaseSlowRequests = resolve; });
+  let settled = false;
+  const client = makeClient({
+    onChunk: async (url) => {
+      const partNumber = Number(new URLSearchParams(url.split("?")[1]).get("part_number"));
+      if (partNumber === 1) throw new Error("permanent chunk failure");
+      await slowRequests;
+      return success({});
+    },
+  });
+  const upload = uploadFileInChunks(makeFile(12), metadata, "token", undefined, {
+    httpClient: client,
+    computeMD5: async () => "0123456789abcdef0123456789abcdef",
+    storage: makeStorage(),
+    chunkSize: 4,
+    sleep: async () => {},
+  }).catch((error) => {
+    settled = true;
+    throw error;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const settledBeforeOtherRequestsFinished = settled;
+  releaseSlowRequests();
+  await expect(upload).rejects.toThrow("permanent chunk failure");
+  expect(settledBeforeOtherRequestsFinished).toBe(false);
+  expect(client.post.mock.calls.some(([url]) => url.endsWith("/upload/merge"))).toBe(false);
+});

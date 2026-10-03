@@ -36,6 +36,7 @@ type Redis struct {
 
 type UploadConfig struct {
 	TempDir                string `mapstructure:"tempDir"`
+	PublicBaseURL          string `mapstructure:"publicBaseURL"`
 	PartSize               int64  `mapstructure:"partSize"`
 	MaxChunkSize           int64  `mapstructure:"maxChunkSize"`
 	MaxUploadSize          int64  `mapstructure:"maxUploadSize"`

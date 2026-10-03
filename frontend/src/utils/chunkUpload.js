@@ -163,19 +163,30 @@ export async function uploadFileInChunks(file, metadata, token, onProgress, depe
   let completed = uploaded.size;
   onProgress?.({ phase: "uploading", percent: Math.round((completed / totalParts) * 100), uploadedParts: completed, totalParts });
   let nextIndex = 0;
+  let hasWorkerError = false;
+  let workerError;
   const uploadWorker = async () => {
     while (nextIndex < pending.length) {
+      if (hasWorkerError) return;
       const partNumber = pending[nextIndex];
       nextIndex += 1;
       const start = (partNumber - 1) * chunkSize;
       const blob = file.slice(start, Math.min(start + chunkSize, file.size));
-      await uploadChunkWithRetry({ httpClient, uploadID, partNumber, blob, token, sleepFn });
+      try {
+        await uploadChunkWithRetry({ httpClient, uploadID, partNumber, blob, token, sleepFn });
+      } catch (error) {
+        if (!hasWorkerError) workerError = error;
+        hasWorkerError = true;
+        throw error;
+      }
       completed += 1;
       onProgress?.({ phase: "uploading", percent: Math.round((completed / totalParts) * 100), uploadedParts: completed, totalParts });
     }
   };
 
-  await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL_UPLOADS, pending.length) }, uploadWorker));
+  const workers = await Promise.allSettled(Array.from({ length: Math.min(MAX_PARALLEL_UPLOADS, pending.length) }, uploadWorker));
+  const failedWorker = workers.find((result) => result.status === "rejected");
+  if (failedWorker) throw workerError;
   onProgress?.({ phase: "merging", percent: 100, uploadedParts: completed, totalParts });
   const result = await post(httpClient, "merge", { upload_id: uploadID, file_md5: md5 }, token);
   clearUploadID(storage, key);

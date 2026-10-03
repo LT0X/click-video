@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -106,6 +107,54 @@ func (m *Manager) CleanupExpired(now time.Time, ttl time.Duration) ([]string, er
 	}
 	sort.Strings(removed)
 	return removed, nil
+}
+
+// CleanupStaleMergeFiles 清理进程异常退出后遗留的合并中间文件。
+func (m *Manager) CleanupStaleMergeFiles(now time.Time, maxAge time.Duration) ([]string, error) {
+	if m.config.VideoDir == "" {
+		return nil, errors.New("正式视频目录未配置")
+	}
+	if maxAge <= 0 {
+		return nil, errors.New("合并临时文件清理期限必须大于 0")
+	}
+	scratchDir := filepath.Join(m.config.VideoDir, mergeScratchDir)
+	entries, err := os.ReadDir(scratchDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("扫描合并临时目录失败: %w", err)
+	}
+
+	removed := make([]string, 0)
+	for _, entry := range entries {
+		if !validMergeScratchName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return removed, fmt.Errorf("读取合并临时文件信息失败: %w", err)
+		}
+		if !info.Mode().IsRegular() || now.Sub(info.ModTime()) < maxAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(scratchDir, entry.Name())); err != nil {
+			return removed, fmt.Errorf("清理合并临时文件失败: %w", err)
+		}
+		removed = append(removed, entry.Name())
+	}
+	sort.Strings(removed)
+	return removed, nil
+}
+
+func validMergeScratchName(name string) bool {
+	const uploadIDLength = 36
+	const suffix = ".merge"
+	uploadIDEnd := 1 + uploadIDLength
+	if len(name) <= uploadIDEnd+1+len(suffix) || name[0] != '.' || name[uploadIDEnd] != '-' || !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	return validateUploadID(name[1:uploadIDEnd]) == nil
 }
 
 // UploadIDs 返回临时目录下的合法上传 ID，供清理任务逐个确认 Redis 状态。

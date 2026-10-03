@@ -19,7 +19,7 @@ import (
 func TestVideoUploadInitReturnsFastPassAndResumeParts(t *testing.T) {
 	manager, store, uploadService, root, _ := newUploadServiceTestFixture(t)
 	fastMD5 := md5Text("already stored")
-	store.md5[fastMD5] = 77
+	store.md5[uploadMD5Key(23, fastMD5)] = 77
 	fastPass, err := uploadService.Init(context.Background(), 23, UploadInitRequest{
 		FileName: "clip.mp4", FileSize: 10, FileMD5: fastMD5, TotalParts: 2, Title: "标题", Topic: "默认",
 	})
@@ -54,8 +54,27 @@ func TestVideoUploadInitReturnsFastPassAndResumeParts(t *testing.T) {
 	}
 }
 
+func TestVideoUploadInitDoesNotFastPassAnotherAuthorsVideo(t *testing.T) {
+	_, store, uploadService, _, _ := newUploadServiceTestFixture(t)
+	fileMD5 := md5Text("already stored")
+	store.md5[uploadMD5Key(23, fileMD5)] = 77 // 模拟该文件只由另一个作者发布过。
+
+	result, err := uploadService.Init(context.Background(), 24, UploadInitRequest{
+		FileName: "clip.mp4", FileSize: 10, FileMD5: fileMD5, TotalParts: 2, Title: "标题", Topic: "默认",
+	})
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if result.AlreadyUploaded || result.UploadID == "" {
+		t.Fatalf("Init() = (%+v), want a new upload for the requesting author", result)
+	}
+}
+
 func TestVideoUploadMergeValidatesBeforePublishingAndIsIdempotent(t *testing.T) {
 	manager, store, uploadService, _, calls := newUploadServiceTestFixture(t)
+	uploadService.snapshot = func(_ string, imagePath string, _ int) (string, error) {
+		return filepath.Base(imagePath), nil
+	}
 	uploadID := testUploadID
 	fileContents := "helloworld"
 	meta := upload.Metadata{
@@ -96,6 +115,20 @@ func TestVideoUploadMergeValidatesBeforePublishingAndIsIdempotent(t *testing.T) 
 	merged, err := uploadService.Merge(context.Background(), 23, uploadID, meta.FileMD5)
 	if err != nil || merged.VideoID != 88 {
 		t.Fatalf("Merge() = (%+v, %v), want video ID 88", merged, err)
+	}
+	if want := "https://media.example.test/video/videos/" + uploadID + ".mp4"; merged.PlayURL != want {
+		t.Fatalf("Merge() play URL = %q, want %q", merged.PlayURL, want)
+	}
+	select {
+	case updated := <-calls.updatedURLs:
+		if want := "https://media.example.test/video/videos/" + uploadID + ".mp4"; updated.PlayURL != want {
+			t.Errorf("UpdateVideoURL() play URL = %q, want %q", updated.PlayURL, want)
+		}
+		if want := "https://media.example.test/video/covers/" + uploadID + ".png"; updated.CoverURl != want {
+			t.Errorf("UpdateVideoURL() cover URL = %q, want %q", updated.CoverURl, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for asynchronous cover update")
 	}
 	if _, err := uploadService.Merge(context.Background(), 23, uploadID, meta.FileMD5); err != nil {
 		t.Fatalf("idempotent Merge() error = %v", err)
@@ -172,12 +205,12 @@ func (s *uploadServiceTestStore) SetVideoID(id string, videoID uint64) error {
 	s.sessions[id] = meta
 	return nil
 }
-func (s *uploadServiceTestStore) SetVideoByMD5(fileMD5 string, videoID uint64) error {
-	s.md5[fileMD5] = videoID
+func (s *uploadServiceTestStore) SetVideoByMD5(userID uint64, fileMD5 string, videoID uint64) error {
+	s.md5[uploadMD5Key(userID, fileMD5)] = videoID
 	return nil
 }
-func (s *uploadServiceTestStore) VideoByMD5(fileMD5 string) (uint64, bool, error) {
-	videoID, ok := s.md5[fileMD5]
+func (s *uploadServiceTestStore) VideoByMD5(userID uint64, fileMD5 string) (uint64, bool, error) {
+	videoID, ok := s.md5[uploadMD5Key(userID, fileMD5)]
 	return videoID, ok, nil
 }
 func (s *uploadServiceTestStore) RemoveParts(id string) error {
@@ -186,8 +219,9 @@ func (s *uploadServiceTestStore) RemoveParts(id string) error {
 }
 
 type uploadRPCCallCounts struct {
-	create    int
-	workCount int
+	create      int
+	workCount   int
+	updatedURLs chan *video.UpdateVideoURLRequest
 }
 
 func newUploadServiceTestFixture(t *testing.T) (*upload.Manager, *uploadServiceTestStore, *VideoUploadService, string, *uploadRPCCallCounts) {
@@ -199,11 +233,12 @@ func newUploadServiceTestFixture(t *testing.T) (*upload.Manager, *uploadServiceT
 	})
 	store := &uploadServiceTestStore{sessions: make(map[string]upload.Metadata), parts: make(map[string]map[int]struct{}), md5: make(map[string]uint64)}
 	cfg := UploadServiceConfig{
-		Upload:   upload.Config{TempDir: filepath.Join(root, "tmp"), VideoDir: filepath.Join(root, "videos"), PartSize: 5, MaxChunkSize: 10, MaxUploadSize: 50, MaxParts: 10, MergeConcurrency: 3},
-		CoverDir: filepath.Join(root, "covers"),
+		Upload:        upload.Config{TempDir: filepath.Join(root, "tmp"), VideoDir: filepath.Join(root, "videos"), PartSize: 5, MaxChunkSize: 10, MaxUploadSize: 50, MaxParts: 10, MergeConcurrency: 3},
+		CoverDir:      filepath.Join(root, "covers"),
+		PublicBaseURL: "https://media.example.test/",
 	}
 	api := &VideoUploadService{config: cfg, manager: manager, state: store}
-	calls := &uploadRPCCallCounts{}
+	calls := &uploadRPCCallCounts{updatedURLs: make(chan *video.UpdateVideoURLRequest, 1)}
 	api.rpc = UploadRPC{
 		CreateVideo: func(context.Context, *video.CreateVideoRequest) (*video.CreateVideoResponse, error) {
 			calls.create++
@@ -216,7 +251,8 @@ func newUploadServiceTestFixture(t *testing.T) (*upload.Manager, *uploadServiceT
 			}
 			return &user.IncrementWorkCountResponse{Applied: true}, nil
 		},
-		UpdateVideoURL: func(context.Context, *video.UpdateVideoURLRequest) (*video.UpdateVideoURLResponse, error) {
+		UpdateVideoURL: func(_ context.Context, req *video.UpdateVideoURLRequest) (*video.UpdateVideoURLResponse, error) {
+			calls.updatedURLs <- req
 			return &video.UpdateVideoURLResponse{Reply: 1}, nil
 		},
 	}

@@ -22,6 +22,7 @@ const (
 	defaultMergeConcurrency       = 3
 	mergeBufferSize               = 256 * 1024
 	copyBufferSize                = 32 * 1024
+	mergeScratchDir               = ".upload-merge"
 )
 
 var (
@@ -181,7 +182,11 @@ func (m *Manager) Merge(uploadID string, totalParts int, expectedSize int64, exp
 
 func (m *Manager) mergeToFile(uploadID string, totalParts int, expectedSize int64, expectedMD5, finalPath string) error {
 	partDir := filepath.Join(m.config.TempDir, uploadID)
-	output, err := os.CreateTemp(m.config.VideoDir, "."+uploadID+"-*.merge")
+	scratchDir := filepath.Join(m.config.VideoDir, mergeScratchDir)
+	if err := os.MkdirAll(scratchDir, 0o750); err != nil {
+		return fmt.Errorf("创建合并临时目录失败: %w", err)
+	}
+	output, err := os.CreateTemp(scratchDir, "."+uploadID+"-*.merge")
 	if err != nil {
 		return fmt.Errorf("创建合并临时文件失败: %w", err)
 	}

@@ -41,6 +41,7 @@ func main() {
 	uploadState := service.NewUploadState(cache.VideoRedisClient, uploadManager, uploadTTL, time.Duration(config.System.Upload.TTLJitterSeconds)*time.Second)
 	uploadService := service.NewVideoUploadService(service.UploadServiceConfig{
 		Upload: uploadConfig, CoverDir: filepath.Join(config.System.HttpAddress.VideoAddress, "covers"),
+		PublicBaseURL: config.System.Upload.PublicBaseURL,
 	}, uploadManager, uploadState, service.UploadRPC{
 		CreateVideo: func(ctx context.Context, req *video.CreateVideoRequest) (*video.CreateVideoResponse, error) {
 			return database.RPC.VideoRpc.CreateVideo(ctx, req)
@@ -62,6 +63,8 @@ func main() {
 		StreamRequestBody:            true,
 		DisablePreParseMultipartForm: true,
 	})
+	// 上传分片和合并中间文件不应通过静态文件路由下载。
+	router.ProtectUploadInternalFiles(app, "/static", config.System.HttpAddress.VideoAddress, config.System.Upload.TempDir)
 	// 使用中间件打印日志
 	app.Static("/static", config.System.HttpAddress.VideoAddress)
 	app.Use(logger.New())

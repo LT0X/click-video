@@ -171,21 +171,21 @@ func (s *UploadState) RemoveParts(uploadID string) error {
 	return nil
 }
 
-func (s *UploadState) SetVideoByMD5(fileMD5 string, videoID uint64) error {
-	if !upload.ValidMD5(fileMD5) || videoID == 0 {
+func (s *UploadState) SetVideoByMD5(userID uint64, fileMD5 string, videoID uint64) error {
+	if userID == 0 || !upload.ValidMD5(fileMD5) || videoID == 0 {
 		return errors.New("秒传映射参数不合法")
 	}
-	if err := s.client.Set(uploadMD5Key(fileMD5), videoID, randomizedUploadTTL(defaultUploadMD5TTL, s.ttlJitter)).Err(); err != nil {
+	if err := s.client.Set(uploadMD5Key(userID, fileMD5), videoID, randomizedUploadTTL(defaultUploadMD5TTL, s.ttlJitter)).Err(); err != nil {
 		return fmt.Errorf("保存秒传映射失败: %w", err)
 	}
 	return nil
 }
 
-func (s *UploadState) VideoByMD5(fileMD5 string) (uint64, bool, error) {
-	if !upload.ValidMD5(fileMD5) {
+func (s *UploadState) VideoByMD5(userID uint64, fileMD5 string) (uint64, bool, error) {
+	if userID == 0 || !upload.ValidMD5(fileMD5) {
 		return 0, false, errors.New("文件 MD5 格式不合法")
 	}
-	value, err := s.client.Get(uploadMD5Key(fileMD5)).Result()
+	value, err := s.client.Get(uploadMD5Key(userID, fileMD5)).Result()
 	if err == redis.Nil {
 		return 0, false, nil
 	}
@@ -235,12 +235,16 @@ func RunUploadCleanup(ctx context.Context, manager *upload.Manager, state *Uploa
 		ttl = defaultUploadTTL
 	}
 	cleanup := func() {
+		now := time.Now()
+		// 合并文件位于正式视频同一卷以支持原子改名；留出两倍会话 TTL，避免清理仍在运行的慢速合并。
+		if _, err := manager.CleanupStaleMergeFiles(now, 2*ttl+state.ttlJitter); err != nil {
+			zap.L().Warn("清理崩溃遗留的视频合并文件失败", zap.Error(err))
+		}
 		ids, err := manager.UploadIDs()
 		if err != nil {
 			zap.L().Error("扫描视频上传目录失败", zap.Error(err))
 			return
 		}
-		now := time.Now()
 		for _, uploadID := range ids {
 			canRemove, err := uploadDirectoryCanBeRemoved(now, manager, uploadID, ttl+state.ttlJitter, func(id string) error {
 				_, err := state.Get(id)
@@ -350,7 +354,9 @@ func randomizedUploadTTL(base, jitter time.Duration) time.Duration {
 
 func uploadMetaKey(uploadID string) string  { return uploadMetaKeyPrefix + uploadID }
 func uploadPartsKey(uploadID string) string { return uploadPartsKeyPrefix + uploadID }
-func uploadMD5Key(fileMD5 string) string    { return uploadMD5KeyPrefix + fileMD5 }
+func uploadMD5Key(userID uint64, fileMD5 string) string {
+	return uploadMD5KeyPrefix + strconv.FormatUint(userID, 10) + ":" + fileMD5
+}
 
 func uploadMetadataFields(meta upload.Metadata) map[string]interface{} {
 	return map[string]interface{}{

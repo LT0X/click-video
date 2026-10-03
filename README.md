@@ -334,7 +334,7 @@ Handler 层职责统一：**参数解析 + 鉴权 + 调用 service + 包装 resp
 
 **文件上传**（`upload.go`）：旧 `/douyin/publish/action/` 路径继续兼容；前端大视频上传改走分片 API。Worker 按 2 MiB 块计算 MD5，文件按 5 MiB 分片以最多 3 路并发上传，失败按指数退避重试；浏览器本地保存 upload ID，重新选择相同文件和发布信息时续传。七牛云 SDK 已集成（`UploadToOSS`），作为预留的异步上传方案。
 
-分片接口接收原始 `application/octet-stream` body，不走 multipart；网关 request body stream 用 `io.Copy` 写入 `upload.tempDir`，合并时按 `part_%05d` 顺序以 256 KiB 缓冲区流式写到 `<videoAddress>/videos/` 并校验整体 MD5。每个分片请求体上限由 `maxChunkSize` 控制（默认 10 MiB），Fiber 全局 `BodyLimit` 仍为 30 MiB；合并并发最多 3 个。临时任务默认 24 小时加 0–5 分钟随机 TTL，后台每 30 分钟清理过期状态和孤儿目录；封面写入 `<videoAddress>/covers/`。
+分片接口接收原始 `application/octet-stream` body，不走 multipart；网关 request body stream 用 `io.Copy` 写入 `upload.tempDir`，合并时按 `part_%05d` 顺序以 256 KiB 缓冲区流式写到 `<videoAddress>/videos/` 并校验整体 MD5。合并中间文件放在正式视频同卷的隐藏 `.upload-merge/` 目录以支持原子改名；`/static` 和 `/video` 静态挂载都拒绝访问分片暂存目录与合并中间目录，避免泄露未发布视频。后台每 30 分钟清理超过两倍上传 TTL 的崩溃遗留文件。每个分片请求体上限由 `maxChunkSize` 控制（默认 10 MiB），Fiber 全局 `BodyLimit` 仍为 30 MiB；合并并发最多 3 个。临时任务默认 24 小时加 0–5 分钟随机 TTL，后台每 30 分钟清理过期状态和孤儿目录；封面写入 `<videoAddress>/covers/`。
 
 **雪花 ID**（`snoyflake.go`）：基于 `sony/sonyflake`，全局单例，`StartTime` 固定为常量 `1698775594477`（2023-10-31）。注释明确：设置成 `time.Now` 后运行期间不能停止，否则可能 ID 重复。仅用于评论 ID 生成。
 
@@ -459,6 +459,7 @@ videoRedis:            # db 1 视频域
 
 upload:                 # 本地视频分片上传
   tempDir: "./douyinVideo/upload/tmp"
+  publicBaseURL: "http://127.0.0.1:8010" # 前端可访问的视频/API 服务基地址
   partSize: 5242880              # 前端每片 5 MiB
   maxChunkSize: 10485760         # 单片服务端硬上限 10 MiB
   maxUploadSize: 52428800000     # 文件总大小上限约 50 GiB
@@ -481,7 +482,7 @@ ContactRpc:            # gRPC 服务发现（etcd）
   NonBlock: true
 ```
 
-前端分片大小固定为 5 MiB，Redis 上传状态存放在 `videoRedis`（DB1）。`upload:{uploadID}` Hash 和 `upload_parts:{uploadID}` Set 使用 24 小时基础 TTL 加 `ttlJitterSeconds` 随机偏移；`upload_md5:{fileMD5}` String 秒传映射使用 7 天基础 TTL 加相同随机偏移。分片接口用 query 传 `upload_id`、`part_number`、`size`，并通过 `token` 请求头鉴权；`init` 和 `merge` 请求体为 JSON。
+前端分片大小固定为 5 MiB，Redis 上传状态存放在 `videoRedis`（DB1）。`upload:{uploadID}` Hash 和 `upload_parts:{uploadID}` Set 使用 24 小时基础 TTL 加 `ttlJitterSeconds` 随机偏移；`upload_md5:{userID}:{fileMD5}` String 秒传映射按作者隔离，使用 7 天基础 TTL 加相同随机偏移。`publicBaseURL` 是浏览器可访问的 API/媒体服务基地址，播放与封面 URL 都使用它，避免前后端不同源时请求发往前端服务器；如果部署使用同源反向代理，可留空并由相对路径路由。分片接口用 query 传 `upload_id`、`part_number`、`size`，并通过 `token` 请求头鉴权；`init` 和 `merge` 请求体为 JSON。
 
 ### Redis Key 命名规范
 
@@ -502,7 +503,7 @@ ContactRpc:            # gRPC 服务发现（etcd）
 | `hot_video:{id}` | String | 热点视频标记，5 分钟加随机偏移过期（DB1） |
 | `upload:{uploadID}` | Hash | 分片上传元数据和状态，24 小时加 0–5 分钟随机偏移（DB1） |
 | `upload_parts:{uploadID}` | Set | 已成功落盘的分片序号，续传时与本地文件一起校验（DB1） |
-| `upload_md5:{fileMD5}` | String | 文件 MD5 到 video ID 的秒传映射，7 天加随机偏移（DB1） |
+| `upload_md5:{userID}:{fileMD5}` | String | 作者范围内文件 MD5 到 video ID 的秒传映射，7 天加随机偏移（DB1） |
 | `comment:{videoID}` | ZSet | 评论列表（score=时间戳） |
 | `lock:comment:{videoID}` | String | 分布式锁 |
 | `login_counter:{username}` | String | 登录限流计数 |

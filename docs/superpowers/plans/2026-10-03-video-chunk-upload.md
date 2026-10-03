@@ -14,7 +14,7 @@
 
 - 不改变既有 API 路径和响应结构；新增 `/api/upload/init`、`/api/upload/chunk`、`/api/upload/merge`。
 - 单分片以流方式写本地磁盘；合并以固定大小缓冲区顺序处理；后端单请求内存目标低于 2MB。
-- Redis 上传状态有效期以 24h 为基础并增加随机偏移；临时目录每 30 分钟清理过期项；不使用 Redis `KEYS`。
+- Redis 上传状态有效期以 24h 为基础并增加随机偏移；临时目录每 30 分钟清理过期项，合并隐藏目录每 30 分钟清理超过两倍 TTL 的进程崩溃残留；不使用 Redis `KEYS`。
 - 最大合并并发为 3；客户端分片大小为 5MiB、客户端 MD5 分块读取为 2MiB、分片数上限为 10,000（可上传至约 50GiB）。
 - user 表只由 user.rpc 更新，video 表只由 video.rpc 更新；新增 Redis key 和配置同步登记到 README。
 - 中文注释；新增业务依赖仅限于浏览器 MD5 所需的 SparkMD5；Go SQL mock 仅用于验证 RPC 数据库事务。
@@ -27,6 +27,8 @@
 - 缺失分片、总大小错误或整体 MD5 不匹配时不得发布视频记录；由合并测试覆盖。
 - 视频记录创建成功但 user.rpc 或 Redis 后续步骤失败时，重试不得重复建视频或重复增加作品数；由 RPC 幂等状态测试覆盖。
 - Redis 已记录分片但本地文件缺失时，续传列表不得把该分片报告为已完成；由状态服务测试覆盖。
+- 秒传映射必须按作者隔离；播放与封面 URL 必须使用配置的媒体服务基地址，避免跨域部署把媒体请求发往前端源。
+- 进程崩溃遗留的合并临时文件应在保留期限后回收，且不能通过静态路由下载；由 `TestCleanupStaleMergeFiles` 覆盖文件年龄与命名过滤。
 
 ---
 
@@ -38,7 +40,7 @@
 
 **Interfaces:**
 - Produces `NewManager(Config) *Manager`、`(*Manager).WritePart(uploadID string, partNumber, totalParts int, src io.Reader, declaredSize int64) (string, error)`、`(*Manager).Merge(uploadID string, totalParts int, expectedSize int64, expectedMD5 string) (string, error)`。
-- 分片路径固定为 `part_%05d`；中间文件写完并校验长度后原子改名。合并以 256KiB bufio 缓冲区按 1..N 顺序写入临时输出，并在同一遍流式计算 MD5。
+- 分片路径固定为 `part_%05d`；中间文件写完并校验长度后原子改名。合并以 256KiB bufio 缓冲区按 1..N 顺序写入正式视频同卷的隐藏临时目录，并在同一遍流式计算 MD5；超过两倍 TTL 的崩溃遗留临时文件会定时清理。
 
 - [x] 写测试：`TestWritePartStreamsAndUsesPartNumberName` 检查逐块 reader、落盘内容和 `part_00001` 命名。
 - [x] 写测试：`TestWritePartAllocatesLessThanTwoMiBForLargeReader` 用不缓存内容的 10MiB reader 验证 Go 分片写入分配低于 2MiB。
@@ -63,12 +65,12 @@
 
 **Interfaces:**
 - 状态服务创建/读取上传元数据、读取已完成分片、标记分片、设置合并/完成状态、查秒传映射。
-- Key: `upload:{uploadID}`（Hash）、`upload_parts:{uploadID}`（Set）、`upload_md5:{md5}`（String）。元数据和分片集合使用同一 24h 基础 TTL 与随机偏移。
+- Key: `upload:{uploadID}`（Hash）、`upload_parts:{uploadID}`（Set）、`upload_md5:{userID}:{md5}`（String）。元数据和分片集合使用同一 24h 基础 TTL 与随机偏移；秒传映射按作者隔离。
 - 初始化信息以原子写入方式保存在 `<tempDir>/<uploadID>/meta.json`；清理任务先确认 Redis 会话已过期，再移除超过 TTL+jitter 的本地目录；已知目录名可推导 Redis key，不执行 `KEYS`。
 
 - [x] 写测试：`TestValidateUploadMetadataRejectsInvalidValues` 拒绝无效 MD5、非法 part count、负大小和超过 10,000 片上限的文件。
 - [x] 写测试：`TestAvailableUploadedPartsIgnoresMissingFiles` 只返回本地分片文件确实存在的 Redis 分片记录。
-- [x] 写测试：`TestCleanupExpiredUploadDirs` 删除超过 24h 的目录并保留未过期/近期活跃目录；`TestCleanupDecisionPreservesLiveOrUnreadableSessions` 覆盖 Redis 会话保护。
+- [x] 写测试：`TestCleanupExpiredUploadDirs` 删除超过 24h 的目录并保留未过期/近期活跃目录；`TestCleanupDecisionPreservesLiveOrUnreadableSessions` 覆盖 Redis 会话保护；`TestCleanupStaleMergeFiles` 只清理超期且命名合法的合并临时文件。
 - [x] 写测试：`TestRandomizedUploadTTLStaysWithinWindow` 验证 TTL 在 24h 到 24h+5m 范围内。
 - [x] 写测试：`TestApplyUploadDefaultsUsesBoundedDefaults` 验证未配置时默认使用 5MiB 分片、10MiB 单片、10,000 片、24h TTL 和 30min 清理间隔。
 - [x] 确认测试先失败，再实现 Redis 状态适配器、配置默认值和清理 worker。
