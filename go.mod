@@ -50,7 +50,6 @@ require (
 	github.com/onsi/gomega v1.28.0 // indirect
 	github.com/openzipkin/zipkin-go v0.4.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
-	github.com/prometheus/client_golang v1.13.0 // indirect
 	github.com/prometheus/client_model v0.2.0 // indirect
 	github.com/prometheus/common v0.37.0 // indirect
 	github.com/prometheus/procfs v0.8.0 // indirect
@@ -128,3 +127,5 @@ require (
 	gorm.io/gorm v1.25.4
 	gorm.io/plugin/dbresolver v1.4.7
 )
+
+require github.com/prometheus/client_golang v1.13.0
