@@ -7,6 +7,7 @@ import (
 
 type Message struct {
 	ID         int64     `gorm:"primaryKey" json:"id"`
+	EventID    *string   `gorm:"type:varchar(64);uniqueIndex:uk_message_event_id" json:"event_id,omitempty"`
 	Content    string    `gorm:"not null;type:text" json:"content"`
 	CreateTime time.Time `gorm:"not null;index" json:"create_time"` // 消息发送时间 yyyy-MM-dd HH:MM:ss
 	FromUserID uint64    `gorm:"not null;index:idx_user_touser" json:"from_user_id"`

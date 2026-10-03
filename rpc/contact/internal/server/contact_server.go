@@ -33,6 +33,11 @@ func (s *ContactServer) CreateMessage(ctx context.Context, in *contact.CreateMes
 	return l.CreateMessage(in)
 }
 
+func (s *ContactServer) CreateMessagesBatch(ctx context.Context, in *contact.CreateMessagesBatchRequest) (*contact.CreateMessagesBatchResponse, error) {
+	l := logic.NewCreateMessagesBatchLogic(ctx, s.svcCtx)
+	return l.CreateMessagesBatch(in)
+}
+
 func (s *ContactServer) MessageList(ctx context.Context, in *contact.MessageListRequest) (*contact.MessageListResponse, error) {
 	l := logic.NewMessageListLogic(ctx, s.svcCtx)
 	return l.MessageList(in)

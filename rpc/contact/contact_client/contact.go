@@ -16,6 +16,9 @@ import (
 type (
 	CreateMessageRequest            = contact.CreateMessageRequest
 	CreateMessageResponse           = contact.CreateMessageResponse
+	ChatMessageInput                = contact.ChatMessageInput
+	CreateMessagesBatchRequest      = contact.CreateMessagesBatchRequest
+	CreateMessagesBatchResponse     = contact.CreateMessagesBatchResponse
 	FollowRequest                   = contact.FollowRequest
 	FollowResponse                  = contact.FollowResponse
 	GetMessageNewestRequest         = contact.GetMessageNewestRequest
@@ -35,6 +38,7 @@ type (
 	Contact interface {
 		Ping(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error)
 		CreateMessage(ctx context.Context, in *CreateMessageRequest, opts ...grpc.CallOption) (*CreateMessageResponse, error)
+		CreateMessagesBatch(ctx context.Context, in *CreateMessagesBatchRequest, opts ...grpc.CallOption) (*CreateMessagesBatchResponse, error)
 		MessageList(ctx context.Context, in *MessageListRequest, opts ...grpc.CallOption) (*MessageListResponse, error)
 		GetMessageNewest(ctx context.Context, in *GetMessageNewestRequest, opts ...grpc.CallOption) (*GetMessageNewestResponse, error)
 		Follow(ctx context.Context, in *FollowRequest, opts ...grpc.CallOption) (*FollowResponse, error)
@@ -62,6 +66,11 @@ func (m *defaultContact) Ping(ctx context.Context, in *Request, opts ...grpc.Cal
 func (m *defaultContact) CreateMessage(ctx context.Context, in *CreateMessageRequest, opts ...grpc.CallOption) (*CreateMessageResponse, error) {
 	client := contact.NewContactClient(m.cli.Conn())
 	return client.CreateMessage(ctx, in, opts...)
+}
+
+func (m *defaultContact) CreateMessagesBatch(ctx context.Context, in *CreateMessagesBatchRequest, opts ...grpc.CallOption) (*CreateMessagesBatchResponse, error) {
+	client := contact.NewContactClient(m.cli.Conn())
+	return client.CreateMessagesBatch(ctx, in, opts...)
 }
 
 func (m *defaultContact) MessageList(ctx context.Context, in *MessageListRequest, opts ...grpc.CallOption) (*MessageListResponse, error) {

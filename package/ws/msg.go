@@ -1,58 +1,194 @@
 package ws
 
 import (
+	"context"
+	"douyin/package/chat"
 	"douyin/package/constant"
 	"douyin/service"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gofiber/contrib/websocket"
 	"go.uber.org/zap"
 )
 
+type clientMessage struct {
+	Type     string `json:"type"`
+	ToUserID uint64 `json:"to_user_id"`
+	Content  string `json:"content"`
+}
+
+var runtime struct {
+	sync.RWMutex
+	registry *chat.Registry
+	routes   *chat.RedisRoutes
+	dispatch *chat.Dispatcher
+	node     string
+}
+
+func ConfigureChat(registry *chat.Registry, routes *chat.RedisRoutes, dispatcher *chat.Dispatcher, nodeAddress string) {
+	runtime.Lock()
+	runtime.registry, runtime.routes, runtime.dispatch, runtime.node = registry, routes, dispatcher, nodeAddress
+	runtime.Unlock()
+}
+
+func currentRuntime() (*chat.Registry, *chat.RedisRoutes, *chat.Dispatcher, string) {
+	runtime.RLock()
+	registry, routes, dispatch, node := runtime.registry, runtime.routes, runtime.dispatch, runtime.node
+	runtime.RUnlock()
+	return registry, routes, dispatch, node
+}
+
 func HandleWebSocket() func(*websocket.Conn) {
 	return func(c *websocket.Conn) {
-		// websocket.Conn bindings https://pkg.go.dev/github.com/fasthttp/websocket?tab=doc#pkg-index
-		var (
-			mt  int
-			msg []byte
-			err error
-		)
-		// c.Locals is added to the *websocket.Conn
-		var service service.MessageService
-		service.ToUserID, err = strconv.ParseUint(c.Query("to_user_id"), 10, 64)
-		if err != nil {
-			zap.L().Error(err.Error())
+		userID, ok := c.Locals(constant.UserID).(uint64)
+		if !ok || userID == 0 {
+			_ = c.Close()
 			return
 		}
-		userID := c.Locals(constant.UserID).(uint64)
-		for {
-			if mt, msg, err = c.ReadMessage(); err != nil {
-				zap.L().Sugar().Errorf("read:", err)
-				break
+		var defaultToUserID uint64
+		if rawToUserID := c.Query("to_user_id"); rawToUserID != "" {
+			parsed, err := strconv.ParseUint(rawToUserID, 10, 64)
+			if err != nil {
+				zap.L().Warn("WebSocket 对端用户 ID 无效", zap.Error(err))
+				_ = c.Close()
+				return
 			}
-			zap.L().Sugar().Infof("recv: %s", msg)
-			ms := strings.Split(string(msg), "\n")
-			if len(ms) == 1 && ms[0] == "get" {
-				// 返回聊天记录
-				res, err := service.MessageChat(userID)
+			defaultToUserID = parsed
+		}
+		registry, routes, dispatcher, nodeAddress := currentRuntime()
+		if registry == nil || routes == nil || dispatcher == nil || nodeAddress == "" {
+			zap.L().Error("聊天 WebSocket 尚未初始化")
+			_ = c.Close()
+			return
+		}
+
+		client := chat.NewClient(c)
+		registry.Register(userID, client)
+		lease, err := routes.Register(context.Background(), userID, nodeAddress)
+		if err != nil {
+			registry.Remove(userID, client)
+			zap.L().Error("注册 WebSocket 在线路由失败", zap.Uint64("user_id", userID), zap.Error(err))
+			_ = client.Close()
+			return
+		}
+		defer func() {
+			registry.Remove(userID, client)
+			if err := routes.Remove(context.Background(), userID, lease); err != nil {
+				zap.L().Warn("清理 WebSocket 在线路由失败", zap.Uint64("user_id", userID), zap.Error(err))
+			}
+		}()
+
+		if err := c.SetReadDeadline(time.Now().Add(chat.RouteTTL)); err != nil {
+			zap.L().Warn("设置 WebSocket 心跳超时失败", zap.Error(err))
+		}
+		for {
+			_, payload, err := c.ReadMessage()
+			if err != nil {
+				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					zap.L().Info("WebSocket 连接结束", zap.Uint64("user_id", userID), zap.Error(err))
+				}
+				return
+			}
+			incoming, err := parseClientMessage(payload, defaultToUserID)
+			if err != nil {
+				if writeErr := client.WriteJSON(map[string]interface{}{"type": "error", "message": err.Error()}); writeErr != nil {
+					zap.L().Warn("WebSocket 错误响应发送失败", zap.Error(writeErr))
+					return
+				}
+				continue
+			}
+			switch incoming.Type {
+			case "ping":
+				refreshed, err := routes.Refresh(context.Background(), userID, lease)
+				if err != nil || !refreshed {
+					zap.L().Warn("WebSocket 心跳续期失败", zap.Uint64("user_id", userID), zap.Error(err))
+					return
+				}
+				if err := c.SetReadDeadline(time.Now().Add(chat.RouteTTL)); err != nil {
+					zap.L().Warn("续期 WebSocket 读超时失败", zap.Error(err))
+					return
+				}
+				if err := client.WriteJSON(map[string]string{"type": "pong"}); err != nil {
+					return
+				}
+			case "get":
+				messageService := service.MessageService{ToUserID: incoming.ToUserID}
+				result, err := messageService.MessageChat(userID)
 				if err != nil {
-					zap.L().Error(err.Error())
+					zap.L().Error("WebSocket 加载聊天历史失败", zap.Error(err))
+					_ = client.WriteJSON(map[string]string{"type": "error", "message": err.Error()})
+					continue
 				}
-				c.WriteJSON(res)
-			} else if len(ms) == 2 && ms[1] == "post" {
-				// 写入数据库 发送给对应的在线好友
-				// 不在线怎么办 ？？
-			} else {
-				msg = []byte("错误的消息格式 连接关闭")
-				err := errors.New(string(msg))
-				zap.L().Error(err.Error())
-				if err = c.WriteMessage(mt, msg); err != nil {
-					zap.L().Sugar().Error("write:", err)
+				if err := client.WriteJSON(result); err != nil {
+					return
 				}
-				break
+			case "message":
+				messageService := &service.MessageService{ActionType: "1", ToUserID: incoming.ToUserID, Content: incoming.Content}
+				if err := messageService.MessageAction(userID); err != nil {
+					_ = client.WriteJSON(map[string]string{"type": "error", "message": err.Error()})
+					continue
+				}
+				queued := messageService.LastQueuedMessage()
+				if err := client.WriteJSON(map[string]interface{}{
+					"type": "accepted", "event_id": queued.EventID, "id": queued.ID,
+					"from_user_id": queued.FromUserID, "to_user_id": queued.ToUserID,
+					"create_time": queued.CreateTime, "content": queued.Content,
+				}); err != nil {
+					return
+				}
+			default:
+				_ = client.WriteJSON(map[string]string{"type": "error", "message": "错误的消息格式"})
+				return
 			}
 		}
 	}
+}
+
+func parseClientMessage(raw []byte, defaultToUserID uint64) (clientMessage, error) {
+	text := string(raw)
+	if text == "ping" {
+		return clientMessage{Type: "ping"}, nil
+	}
+	if text == "get" {
+		if defaultToUserID == 0 {
+			return clientMessage{}, errors.New("查询历史消息缺少对端用户 ID")
+		}
+		return clientMessage{Type: "get", ToUserID: defaultToUserID}, nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(text), "{") {
+		var incoming clientMessage
+		if err := json.Unmarshal(raw, &incoming); err != nil {
+			return clientMessage{}, fmt.Errorf("解析 WebSocket 消息失败: %w", err)
+		}
+		if incoming.Type == "ping" {
+			return incoming, nil
+		}
+		if incoming.ToUserID == 0 {
+			incoming.ToUserID = defaultToUserID
+		}
+		if incoming.Type == "get" {
+			if incoming.ToUserID == 0 {
+				return clientMessage{}, errors.New("查询历史消息缺少对端用户 ID")
+			}
+			return incoming, nil
+		}
+		if incoming.Type != "message" || incoming.ToUserID == 0 || strings.TrimSpace(incoming.Content) == "" {
+			return clientMessage{}, errors.New("消息类型、对端用户 ID 或内容无效")
+		}
+		return incoming, nil
+	}
+	if strings.HasSuffix(text, "\npost") && defaultToUserID != 0 {
+		content := strings.TrimSuffix(text, "\npost")
+		if strings.TrimSpace(content) == "" {
+			return clientMessage{}, errors.New("消息内容为空")
+		}
+		return clientMessage{Type: "message", ToUserID: defaultToUserID, Content: content}, nil
+	}
+	return clientMessage{}, errors.New("错误的消息格式")
 }

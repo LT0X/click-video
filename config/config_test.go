@@ -25,3 +25,22 @@ func TestApplyUploadDefaultsUsesBoundedDefaults(t *testing.T) {
 		t.Fatalf("upload lifecycle defaults = %+v", System.Upload)
 	}
 }
+
+func TestApplyChatDefaultsUsesIsolatedRedisAndRPCAddresses(t *testing.T) {
+	previous := System
+	t.Cleanup(func() { System = previous })
+	t.Setenv("CLICK_VIDEO_CHAT_RPC_TOKEN", "test-chat-rpc-token")
+	System = SystemConfig{UserRedis: Redis{Host: "redis.internal", Port: "6379", PoolSize: 100}}
+
+	applyChatDefaults()
+
+	if System.ChatRedis.Host != "redis.internal" || System.ChatRedis.Port != "6379" || System.ChatRedis.Database != 3 || System.ChatRedis.PoolSize != 100 {
+		t.Fatalf("chat Redis defaults = %+v", System.ChatRedis)
+	}
+	if System.Chat.RPCListenAddress != "127.0.0.1:8014" || System.Chat.AdvertiseAddress != "127.0.0.1:8014" {
+		t.Fatalf("chat RPC addresses = %q / %q", System.Chat.RPCListenAddress, System.Chat.AdvertiseAddress)
+	}
+	if System.Chat.RPCToken != "test-chat-rpc-token" {
+		t.Fatal("chat RPC token was not loaded from CLICK_VIDEO_CHAT_RPC_TOKEN")
+	}
+}

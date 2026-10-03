@@ -17,6 +17,13 @@ export const changeMessages = (id, messages) => {
     messages,
   };
 };
+export const appendMessage = (id, message) => {
+  return {
+    type: "APPEND_MESSAGE",
+    id,
+    message,
+  };
+};
 export const changeChattingFriendId = (id) => {
   return {
     type: "CHANGE_CHATTING_FRIEND_ID",

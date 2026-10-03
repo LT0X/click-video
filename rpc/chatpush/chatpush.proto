@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package chatpush;
+option go_package = "douyin/rpc/chatpush;chatpush";
+
+message DeliveryRequest {
+  string EventID = 1;
+  int64 MessageID = 2;
+  string Content = 3;
+  int64 CreateTime = 4;
+  uint64 FromUserID = 5;
+  uint64 ToUserID = 6;
+}
+
+message DeliveryResponse {
+  bool Delivered = 1;
+}
+
+service ChatPush {
+  rpc Deliver(DeliveryRequest) returns (DeliveryResponse);
+}

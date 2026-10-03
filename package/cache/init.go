@@ -15,6 +15,7 @@ import (
 var UserRedisClient *redis.Client
 var VideoRedisClient *redis.Client
 var CommentRedisClient *redis.Client
+var ChatRedisClient *redis.Client
 
 var UserIDBloomFilter *bloom.BloomFilter
 var VideoIDBloomFilter *bloom.BloomFilter
@@ -52,6 +53,16 @@ func InitRedis() {
 	_, err = VideoRedisClient.Ping().Result()
 	if err != nil {
 		zap.L().Fatal("comment_redis连接失败", zap.Error(err))
+	}
+	ChatRedisClient = redis.NewClient(&redis.Options{
+		Addr:     fmt.Sprintf("%s:%s", config.System.ChatRedis.Host, config.System.ChatRedis.Port),
+		Password: config.System.ChatRedis.Password,
+		DB:       config.System.ChatRedis.Database,
+		PoolSize: config.System.ChatRedis.PoolSize,
+	})
+	_, err = ChatRedisClient.Ping().Result()
+	if err != nil {
+		zap.L().Fatal("chat_redis连接失败", zap.Error(err))
 	}
 	zap.L().Info("redis连接: 成功")
 

@@ -6,11 +6,14 @@ import (
 	"douyin/database"
 	"douyin/handler"
 	"douyin/package/cache"
+	"douyin/package/chat"
 	"douyin/package/llm"
 	"douyin/package/mq"
 	"douyin/package/upload"
 	"douyin/package/util"
+	"douyin/package/ws"
 	"douyin/router"
+	"douyin/rpc/contact/contact"
 	"douyin/rpc/user/user"
 	"douyin/rpc/video/video"
 	"douyin/service"
@@ -29,6 +32,45 @@ func main() {
 	database.InitMySQL()
 	database.NewRPCServiceContext()
 	cache.InitRedis()
+	chatRPCToken, err := chat.ResolveRPCToken(config.System.Chat.RPCToken, config.System.Chat.RPCListenAddress)
+	if err != nil {
+		zap.L().Fatal("聊天节点 gRPC 认证配置无效", zap.Error(err))
+	}
+	chatRegistry := chat.NewRegistry()
+	chatRoutes := chat.NewRedisRoutes(cache.ChatRedisClient)
+	chatRemote := chat.NewGRPCRemotePusher(chatRPCToken)
+	chatCache := chat.NewCache(cache.ChatRedisClient)
+	chatBuffer := chat.NewStreamBuffer(cache.ChatRedisClient, "", func(ctx context.Context, messages []chat.Message) error {
+		request := &contact.CreateMessagesBatchRequest{Messages: make([]*contact.ChatMessageInput, 0, len(messages))}
+		for _, msg := range messages {
+			request.Messages = append(request.Messages, &contact.ChatMessageInput{
+				EventID: msg.EventID, UserID: msg.FromUserID, ToUserID: msg.ToUserID,
+				Content: msg.Content, CreateTime: msg.CreateTime,
+			})
+		}
+		if _, err := database.RPC.ContactRpc.CreateMessagesBatch(ctx, request); err != nil {
+			return err
+		}
+		return chatCache.AfterPersist(messages)
+	})
+	chatDispatcher := chat.NewDispatcher(config.System.Chat.AdvertiseAddress, chatRegistry, chatBuffer, chatRoutes, chatRemote)
+	llm.ConfigureChatMessageSender(func(ctx context.Context, msg chat.Message) error {
+		if err := chatDispatcher.Send(ctx, msg); err != nil {
+			return err
+		}
+		go func() {
+			if err := chatCache.OnMessageQueued(context.Background(), msg); err != nil {
+				zap.L().Warn("更新 AI 聊天消息缓存失败", zap.Error(err))
+			}
+		}()
+		return nil
+	})
+	service.ConfigureChatPipeline(chatDispatcher, chatCache)
+	ws.ConfigureChat(chatRegistry, chatRoutes, chatDispatcher, config.System.Chat.AdvertiseAddress)
+	if _, err := chat.StartPushRPC(config.System.Chat.RPCListenAddress, config.System.Chat.AdvertiseAddress, chatRegistry, chatRPCToken, cache.ChatRedisClient); err != nil {
+		zap.L().Fatal("聊天节点 gRPC 推送服务启动失败", zap.Error(err))
+	}
+	go chatBuffer.Run(context.Background())
 	uploadConfig := upload.Config{
 		TempDir:  config.System.Upload.TempDir,
 		VideoDir: filepath.Join(config.System.HttpAddress.VideoAddress, "videos"),

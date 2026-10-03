@@ -154,7 +154,9 @@ CREATE TABLE `message` (
   `create_time` datetime(3) NOT NULL,
   `from_user_id` bigint unsigned NOT NULL,
   `to_user_id` bigint unsigned NOT NULL,
+  `event_id` varchar(64) DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_message_event_id` (`event_id`),
   KEY `idx_message_create_time` (`create_time`),
   KEY `idx_user_touser` (`from_user_id`,`to_user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

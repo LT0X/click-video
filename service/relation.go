@@ -5,11 +5,13 @@ import (
 	"douyin/database"
 	"douyin/model"
 	"douyin/package/cache"
+	"douyin/package/chat"
 	"douyin/package/constant"
 	"douyin/package/llm"
 	"douyin/package/mq"
 	"douyin/response"
 	"douyin/rpc/contact/contact"
+	"douyin/rpc/user/user"
 	"errors"
 	"fmt"
 	"strconv"
@@ -252,15 +254,18 @@ func (service *RelationService) RelationFriendList() (*response.FriendResponse, 
 	following, err := cache.GetFollowUserIDSet(service.UserID)
 	if err != nil {
 		zap.L().Sugar().Warn(constant.CacheMiss)
-		following, err = database.SelectFollowingByUserID(service.UserID)
-		if err != nil {
-			return nil, err
+		// 关注关系归 contact.rpc 所有，网关不能在缓存未命中时直查 relation 表。
+		followingResp, rpcErr := database.RPC.ContactRpc.SelectFollowingByUserID(context.TODO(), &contact.SelectFollowingByUserIDRequest{
+			UserID: service.UserID,
+		})
+		if rpcErr != nil {
+			return nil, rpcErr
 		}
+		following = followingResp.UserID
 		go func() {
 			// 将缓存写入
-			err = cache.SetFollowUserIDSet(service.UserID, following)
-			if err != nil {
-				zap.L().Error(err.Error())
+			if cacheErr := cache.SetFollowUserIDSet(service.UserID, following); cacheErr != nil {
+				zap.L().Error(cacheErr.Error())
 			}
 		}()
 	}
@@ -299,29 +304,50 @@ func (service *RelationService) RelationFriendList() (*response.FriendResponse, 
 	}
 	friends = append(friends, llm.ChatGPTID)
 	// 拿好友的信息
-	friendsInfo, err := database.SelectUserListByIDs(friends)
+	usersResp, err := database.RPC.UserRpc.SelectUserListByIDs(context.TODO(), &user.SelectUserListByIDsRequest{UserIDs: friends})
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
 	}
+	friendsInfo := make([]model.User, 0, len(usersResp.Users))
+	for _, userInfo := range usersResp.Users {
+		friendsInfo = append(friendsInfo, *model.TransformUser(userInfo))
+	}
 	usersResponse := make([]response.FriendUser, 0, len(friends))
+	chatCache := chat.NewCache(cache.ChatRedisClient)
 	for i := range friendsInfo {
-		// FIXME这里循环查库了 记得规避
-
-		//msg, err := database.GetMessageNewest(service.UserID, friendsInfo[i].ID)
-		resp, err := database.RPC.ContactRpc.GetMessageNewest(context.TODO(), &contact.GetMessageNewestRequest{
-			UserID:   service.UserID,
-			ToUserID: friendsInfo[i].ID,
-		})
-		if err != nil {
-			zap.L().Error(err.Error())
-			return nil, err
+		msg, hit, cacheErr := chatCache.GetNewest(context.Background(), service.UserID, friendsInfo[i].ID)
+		if cacheErr != nil {
+			zap.L().Warn("读取好友最新消息缓存失败，回源 contact.rpc", zap.Error(cacheErr))
+			hit = false
 		}
-		msg := *(model.TransformMessage(resp.Message))
+		if !hit {
+			resp, err := database.RPC.ContactRpc.GetMessageNewest(context.TODO(), &contact.GetMessageNewestRequest{
+				UserID: service.UserID, ToUserID: friendsInfo[i].ID,
+			})
+			if err != nil {
+				zap.L().Error(err.Error())
+				return nil, err
+			}
+			if resp.Message != nil {
+				msg = chat.Message{
+					Content: resp.Message.Content, CreateTime: resp.Message.CreateTime,
+					FromUserID: resp.Message.FromUserID, ID: resp.Message.ID, ToUserID: uint64(resp.Message.ToUserID),
+				}
+				if msg.Content != "" {
+					go func(message chat.Message) {
+						if err := chatCache.UpdateNewest(message); err != nil {
+							zap.L().Warn("异步回填好友最新消息缓存失败", zap.Error(err))
+						}
+					}(msg)
+				}
+			}
+		}
 
 		msgt := 0
-		if err != nil || msg.Content == "" {
-			msg.Content = constant.DefaultMessage
+		messageContent := msg.Content
+		if messageContent == "" {
+			messageContent = constant.DefaultMessage
 		} else {
 			if msg.FromUserID == service.UserID {
 				msgt = 1
@@ -329,7 +355,7 @@ func (service *RelationService) RelationFriendList() (*response.FriendResponse, 
 		}
 		uu := response.FriendUser{
 			User:    *response.UserInfo(&friendsInfo[i], true),
-			Message: msg.Content, // 最近的一条消息 客户端测试了是有的
+			Message: messageContent,
 			MsgType: msgt,
 		}
 		usersResponse = append(usersResponse, uu)
