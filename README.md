@@ -55,7 +55,7 @@ graph TB
     end
 
     subgraph INFRA["基础设施层"]
-        MQ["RabbitMQ<br/><small>4 个 fanout exchange</small>"]
+        MQ["RabbitMQ<br/><small>6 个 fanout + 1 个 direct exchange</small>"]
         ETCD["etcd<br/><small>服务注册发现</small>"]
         OSS["七牛云 OSS<br/><small>对象存储</small>"]
         LLM["讯飞星火<br/><small>AI 对话</small>"]
@@ -280,7 +280,7 @@ Handler 层职责统一：**参数解析 + 鉴权 + 调用 service + 包装 resp
 
 ### 消息队列 — package/mq/
 
-**单生产者 Channel + 多消费者 Channel**：全局共享 `produceChannel` 复用发送，每个消费者独立 Channel 实现隔离。`init.go` 启动 goroutine 监听 `NotifyClose`，Channel 异常关闭时每 3 秒尝试重建。
+**RabbitMQ 发布与消费**：点赞、缓存失效和评论使用带 publisher confirm 的 broker 发布器；其他既有生产者复用 `produceChannel`。每个消费者使用独立 Channel 实现隔离；网关启动 goroutine 监听 `NotifyClose`，发布 Channel 异常关闭时每 3 秒尝试重建。
 
 **fanout exchange**：
 
@@ -289,9 +289,14 @@ Handler 层职责统一：**参数解析 + 鉴权 + 调用 service + 包装 resp
 | comment | JSON 序列化的 `model.Comment` | `VideoRpc.CommentAdd` | 评论发布 |
 | favorite | JSON `FavoriteActionEvent`（event/user/author/video ID、delta） | `user.rpc` 本地事务 | favorite 关系和 user 计数 |
 | favorite_counter | JSON `FavoriteCountEvent`（delta 或 snapshot） | `video.rpc` 计数消费者 | Redis 原子计数、视频表刷盘和快照校准 |
+| cache_invalidation | JSON `CacheInvalidationEvent`（event/video ID、立即或延迟阶段） | 网关缓存消费者 | 评论缓存即时删除和延迟二次删除 |
 | relation | `userID:toUserID:t`（1关注/-1取关） | `ContactRpc.Follow` | 关注 |
 
-点赞专用消费者使用持久队列 `favorite_user_rpc` / `favorite_video_rpc`，`Qos(50, 0, false)` 限流并手动 ACK。格式错误、字段非法或引用不存在用户的永久无效消息会记录并确认丢弃；可重试的处理错误会 Nack 并重新入队。RabbitMQ 发布使用 publisher confirm；user.rpc 的计数事件从 MySQL Outbox 发布，避免提交后进程退出造成事件丢失。RabbitMQ 配置复用根目录 `config/config.yaml` 的 `rabbitmq` 段；独立启动 RPC 时可用 `CLICK_VIDEO_CONFIG` 指定配置文件路径。
+评论由 durable 队列 `comment_writer` 接收，`Qos(50, 0, false)` 限流并手动 ACK。格式错误、字段缺失或超长评论先写入 `comment_dead_letter` 死信队列再确认；暂时性 RPC 错误最多延迟重试 3 次（每次 1 秒），耗尽后进入死信队列。发布使用 publisher confirm 和 mandatory 路由检查。相同评论 ID 重投时，video.rpc 用主键冲突忽略，避免重复增加计数。点赞专用消费者使用持久队列 `favorite_user_rpc` / `favorite_video_rpc`，`Qos(50, 0, false)` 限流并手动 ACK。格式错误、字段非法或引用不存在用户的永久无效消息会记录并确认丢弃；可重试的处理错误会 Nack 并重新入队。user.rpc 的计数事件从 MySQL Outbox 发布，避免提交后进程退出造成事件丢失。RabbitMQ 配置复用根目录 `config/config.yaml` 的 `rabbitmq` 段；独立启动 RPC 时可用 `CLICK_VIDEO_CONFIG` 指定配置文件路径。
+
+评论增删只由 video.rpc 在本域事务中修改评论表和视频计数，并在同一事务写入 `comment_cache_invalidation_outbox`。video.rpc 每 100ms 批量读取 Outbox，publisher confirm 成功后删除记录；若发布后进程崩溃，事件会重发，缓存删除可幂等执行。网关收到 `cache_invalidation` 事件后立即删除评论 ZSet 与 `video_info_count:{videoID}` 的 `comment_count` 字段，再将同一事件送入 TTL 为 500ms、死信回投到原 exchange 的 `cache_invalidation_delay` 队列执行二次删除；点赞计数 Hash 字段保留。视频 ID 布隆过滤器由 video.rpc 从本服务视频表初始化，视频创建后同步加入；按 ID 查视频、查评论和写评论都在 video.rpc 使用该过滤器，网关不再直读 video 表初始化过滤器。
+
+已有数据库升级时，部署新版 video.rpc 前执行 `config/mysql/migrations/20261003_video_comment_cache_outbox.sql`，以保证评论增删事务可写入 Outbox。新建数据库由 `config/mysql/douyin.sql` 创建该表。RabbitMQ 评论新增 `comment_writer`、`comment_retry_1s`、`comment_dead_letter` 持久队列，以及 `comment_retry` direct exchange；没有新增 Redis Key。
 
 已有数据库升级时，先暂停网关点赞写入，让旧版 `user.rpc` 和 `video.rpc` 消费完 `favorite_user_rpc` / `favorite_video_rpc` 持久队列，再执行 `config/mysql/migrations/20261003_favorite_outbox.sql`。迁移会创建用户域计数状态、数据库动作序号和事务 Outbox，并初始化视频计数基线；随后先启动新版 `user.rpc`、再恢复网关写入。user.rpc 仍能读取缺少动作序号的遗留点赞消息，并在事务锁内分配序号。全新库由 `config/mysql/douyin.sql` 创建这些表。
 
@@ -305,8 +310,8 @@ Handler 层职责统一：**参数解析 + 鉴权 + 调用 service + 包装 resp
 
 **特点**：
 
-- **持久化消息**：RabbitMQ 点赞动作和计数事件均使用 durable exchange/queue 与 `amqp.Persistent` 消息。
-- **毒消息处理差异**：点赞消费者会确认并丢弃格式非法的消息；`comment.go` 解析失败时仍会 `break` 退出 goroutine，P2 缓存一致性专项会修复。
+- **持久化消息**：RabbitMQ 点赞动作、计数事件、评论和缓存失效事件均使用 durable exchange/queue 与 `amqp.Persistent` 消息。
+- **毒消息处理**：评论消费者将无法解析或永久无效消息送入死信队列；暂时性错误限次延迟重试，不会循环毒消息或静默退出。
 - **重试边界**：点赞消费者对业务错误 Nack 重入队，当前没有最大重试次数和死信队列。
 
 ### LLM 集成 — package/llm/

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofrs/uuid"
 	"go.uber.org/zap"
@@ -36,8 +37,20 @@ type CommentService struct {
 
 func (service *CommentService) PostComment(userID uint64) (*response.CommentActionResponse, error) {
 	// TODO 增加敏感词过滤 可以异步实现 comment表多一列屏蔽信息
-	if service.CommentText == nil || *service.CommentText == "" {
+	if service.CommentText == nil || *service.CommentText == "" || utf8.RuneCountInString(*service.CommentText) > 255 {
 		return nil, errors.New(constant.BadParaRequest)
+	}
+	// 评论异步入队前通过 video.rpc 校验视频，避免无效视频的评论被成功应答后再进入死信队列。
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	videoResp, err := database.RPC.VideoRpc.SelectVideoListByVideoID(ctx, &video.SelectVideoListByVideoIDRequest{
+		VideoIDList: []uint64{service.VideoID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if videoResp == nil || len(videoResp.Videos) == 0 {
+		return nil, errors.New(constant.BloomFilterRejected)
 	}
 	id, err := util.GetSonyFlakeID()
 	if err != nil {
@@ -79,9 +92,7 @@ func (service *CommentService) PostComment(userID uint64) (*response.CommentActi
 }
 
 func (service *CommentService) DeleteComment(userID uint64) (*response.CommentActionResponse, error) {
-	// 我们认为删除评论不是高频动作 故不使用消息队列
-	// database里会删缓存 并且校验是不是自己发的 实际上不校验也行
-	// 注意还需要在database里减少视频的评论数
+	// video.rpc 在本服务事务内删除评论、维护计数并写入缓存失效 Outbox。
 	//msg, err := database.CommentDelete(service.CommentID, service.VideoID, userID)
 	cid, _ := strconv.ParseUint(*service.CommentID, 10, 64)
 	resp, err := database.RPC.VideoRpc.CommentDelete(context.TODO(), &video.CommentDeleteRequest{
@@ -118,11 +129,6 @@ func (service *CommentService) DeleteComment(userID uint64) (*response.CommentAc
 func (service *CommentService) CommentList(userID uint64) (*response.CommentListResponse, error) {
 	atomic.AddInt32(&Ppp, 1)
 	fmt.Println(Ppp)
-	// 使用布隆过滤器判断视频ID是否存在
-	if !cache.VideoIDBloomFilter.TestString(strconv.FormatUint(service.VideoID, 10)) {
-		zap.L().Sugar().Error(constant.BloomFilterRejected)
-		return nil, fmt.Errorf(constant.BloomFilterRejected)
-	}
 	// 先拿到这个视频的所有评论
 	comments, err := cache.GetCommentsByVideoID(service.VideoID)
 	if err != nil {
@@ -145,14 +151,14 @@ func (service *CommentService) CommentList(userID uint64) (*response.CommentList
 				})
 				if err != nil {
 					zap.L().Sugar().Error(err)
+					return nil, err
+				}
+				if resp == nil {
+					return nil, errors.New("video.rpc 返回空评论响应")
 				}
 				comments = model.TransformComments(resp.Comment)
 
 				atomic.AddInt32(&CheckDB, 1)
-				if err != nil {
-					zap.L().Sugar().Error(err)
-					return nil, err
-				}
 				err = cache.SetComments(service.VideoID, comments)
 				if err != nil {
 					zap.L().Error(err.Error())

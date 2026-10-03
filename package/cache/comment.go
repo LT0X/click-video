@@ -4,6 +4,7 @@ import (
 	"douyin/model"
 	"douyin/package/constant"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"strconv"
 	"time"
@@ -11,6 +12,23 @@ import (
 	"github.com/go-redis/redis"
 	"go.uber.org/zap"
 )
+
+// InvalidateCommentCache 删除评论列表缓存，不删除点赞计数所在的 Hash，避免丢失视频服务维护的点赞字段。
+func InvalidateCommentCache(videoID uint64) error {
+	if videoID == 0 || CommentRedisClient == nil || VideoRedisClient == nil {
+		return fmt.Errorf("评论缓存失效参数或 Redis 客户端无效")
+	}
+	key := constant.CommentPrefix + strconv.FormatUint(videoID, 10)
+	if err := CommentRedisClient.Del(key).Err(); err != nil {
+		return fmt.Errorf("删除视频 %d 的评论缓存失败: %w", videoID, err)
+	}
+	// 只删评论计数字段，保留 video.rpc 异步维护的点赞计数。
+	countKey := constant.VideoInfoCountPrefix + strconv.FormatUint(videoID, 10)
+	if err := VideoRedisClient.HDel(countKey, constant.CommentCountField).Err(); err != nil {
+		return fmt.Errorf("删除视频 %d 的评论计数缓存失败: %w", videoID, err)
+	}
+	return nil
+}
 
 // 评论增加 会影响视频的评论数 和评论表 需要lua脚本保证原子性 （目前采取删缓存）
 // 评论列表zset吧 按照评论时间排序（可以考虑时间加赞数加权排序）

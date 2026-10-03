@@ -51,6 +51,7 @@ func main() {
 		_ = eventBroker.Close()
 	}()
 	go favoritemq.RunFavoriteCountConsumer(consumerCtx, eventBroker, svcCtx)
+	go favoritemq.RunCommentCacheInvalidationOutbox(consumerCtx, eventBroker, svcCtx)
 	logic.RunFavoriteCounterWorkers(consumerCtx, svcCtx)
 
 	s := zrpc.MustNewServer(c.RpcServerConf, func(grpcServer *grpc.Server) {

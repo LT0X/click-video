@@ -18,10 +18,14 @@ import (
 )
 
 const (
-	FavoriteActionExchange  = "favorite"
-	FavoriteCounterExchange = "favorite_counter"
-	FavoriteUserQueue       = "favorite_user_rpc"
-	FavoriteVideoQueue      = "favorite_video_rpc"
+	FavoriteActionExchange      = "favorite"
+	FavoriteCounterExchange     = "favorite_counter"
+	FavoriteUserQueue           = "favorite_user_rpc"
+	FavoriteVideoQueue          = "favorite_video_rpc"
+	CacheInvalidationExchange   = "cache_invalidation"
+	CacheInvalidationQueue      = "cache_invalidation_gateway"
+	CacheInvalidationDelayQueue = "cache_invalidation_delay"
+	CacheInvalidationDelay      = 500 * time.Millisecond
 
 	FavoriteCountDelta     = "delta"
 	FavoriteCountSnapshot  = "snapshot"
@@ -66,6 +70,27 @@ type FavoriteCountEvent struct {
 	Count   int64  `json:"count,omitempty"`
 }
 
+const (
+	CacheInvalidationImmediate uint8 = iota
+	CacheInvalidationDelayed
+)
+
+type CacheInvalidationEvent struct {
+	EventID uint64 `json:"event_id"`
+	VideoID uint64 `json:"video_id"`
+	Phase   uint8  `json:"phase"`
+}
+
+func (event CacheInvalidationEvent) Validate() error {
+	if event.EventID == 0 || event.VideoID == 0 {
+		return errors.New("缓存失效消息缺少事件 ID 或视频 ID")
+	}
+	if event.Phase != CacheInvalidationImmediate && event.Phase != CacheInvalidationDelayed {
+		return fmt.Errorf("缓存失效消息阶段无效: %d", event.Phase)
+	}
+	return nil
+}
+
 func (event FavoriteCountEvent) Validate() error {
 	if event.EventID == 0 || event.VideoID == 0 {
 		return errors.New("点赞计数消息缺少事件或视频 ID")
@@ -93,6 +118,7 @@ type FavoriteEventBroker struct {
 	connection          *amqp.Connection
 	publisher           *amqp.Channel
 	confirmations       chan amqp.Confirmation
+	returns             chan amqp.Return
 	nextPublishSequence uint64
 	mu                  sync.Mutex
 	closed              bool
@@ -125,7 +151,7 @@ func (broker *FavoriteEventBroker) connectLocked() error {
 		_ = connection.Close()
 		return fmt.Errorf("创建 RabbitMQ 发布通道失败: %w", err)
 	}
-	for _, exchange := range []string{FavoriteActionExchange, FavoriteCounterExchange} {
+	for _, exchange := range []string{FavoriteActionExchange, FavoriteCounterExchange, CacheInvalidationExchange} {
 		if err := publisher.ExchangeDeclare(exchange, "fanout", true, false, false, false, nil); err != nil {
 			_ = publisher.Close()
 			_ = connection.Close()
@@ -138,6 +164,7 @@ func (broker *FavoriteEventBroker) connectLocked() error {
 	}{
 		{queue: FavoriteUserQueue, exchange: FavoriteActionExchange},
 		{queue: FavoriteVideoQueue, exchange: FavoriteCounterExchange},
+		{queue: CacheInvalidationQueue, exchange: CacheInvalidationExchange},
 	} {
 		queue, err := publisher.QueueDeclare(item.queue, true, false, false, false, nil)
 		if err != nil {
@@ -151,6 +178,15 @@ func (broker *FavoriteEventBroker) connectLocked() error {
 			return fmt.Errorf("绑定 RabbitMQ queue %q 失败: %w", item.queue, err)
 		}
 	}
+	_, err = publisher.QueueDeclare(CacheInvalidationDelayQueue, true, false, false, false, amqp.Table{
+		"x-message-ttl":          int32(CacheInvalidationDelay / time.Millisecond),
+		"x-dead-letter-exchange": CacheInvalidationExchange,
+	})
+	if err != nil {
+		_ = publisher.Close()
+		_ = connection.Close()
+		return fmt.Errorf("声明延迟缓存失效队列失败: %w", err)
+	}
 	if err := publisher.Confirm(false); err != nil {
 		_ = publisher.Close()
 		_ = connection.Close()
@@ -159,6 +195,7 @@ func (broker *FavoriteEventBroker) connectLocked() error {
 	broker.connection = connection
 	broker.publisher = publisher
 	broker.confirmations = publisher.NotifyPublish(make(chan amqp.Confirmation, 1))
+	broker.returns = publisher.NotifyReturn(make(chan amqp.Return, 1))
 	broker.nextPublishSequence = 1
 	return nil
 }
@@ -173,6 +210,7 @@ func (broker *FavoriteEventBroker) resetConnectionLocked() {
 		broker.connection = nil
 	}
 	broker.confirmations = nil
+	broker.returns = nil
 	broker.nextPublishSequence = 0
 }
 
@@ -231,11 +269,35 @@ func (broker *FavoriteEventBroker) PublishFavoriteAction(event FavoriteActionEve
 	return broker.publish(FavoriteActionExchange, event.EventID, event)
 }
 
+func (broker *FavoriteEventBroker) PublishCacheInvalidation(event CacheInvalidationEvent) error {
+	if err := event.Validate(); err != nil {
+		return err
+	}
+	if event.Phase == CacheInvalidationDelayed {
+		return broker.publishTo("", CacheInvalidationDelayQueue, event.EventID, event)
+	}
+	return broker.publish(CacheInvalidationExchange, event.EventID, event)
+}
+
 func (broker *FavoriteEventBroker) publish(exchange string, eventID uint64, event interface{}) error {
+	return broker.publishTo(exchange, "", eventID, event)
+}
+
+func (broker *FavoriteEventBroker) publishTo(exchange, routingKey string, eventID uint64, event interface{}) error {
 	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("序列化 RabbitMQ 消息失败: %w", err)
 	}
+	messageID := strconv.FormatUint(eventID, 10)
+	return broker.publishRaw(exchange, routingKey, messageID, false, amqp.Publishing{
+		DeliveryMode: amqp.Persistent,
+		ContentType:  "application/json",
+		MessageId:    messageID,
+		Body:         body,
+	})
+}
+
+func (broker *FavoriteEventBroker) publishRaw(exchange, routingKey, eventID string, mandatory bool, message amqp.Publishing) error {
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
 	if broker.closed {
@@ -246,12 +308,7 @@ func (broker *FavoriteEventBroker) publish(exchange string, eventID uint64, even
 			return err
 		}
 	}
-	err = broker.publisher.Publish(exchange, "", false, false, amqp.Publishing{
-		DeliveryMode: amqp.Persistent,
-		ContentType:  "application/json",
-		MessageId:    strconv.FormatUint(eventID, 10),
-		Body:         body,
-	})
+	err := broker.publisher.Publish(exchange, routingKey, mandatory, false, message)
 	if err != nil {
 		broker.resetConnectionLocked()
 		return fmt.Errorf("发布 RabbitMQ 消息到 %q 失败: %w", exchange, err)
@@ -269,12 +326,19 @@ func (broker *FavoriteEventBroker) publish(exchange string, eventID uint64, even
 			return fmt.Errorf("RabbitMQ publisher confirm 序号不匹配: got=%d want=%d", confirmation.DeliveryTag, expectedSequence)
 		}
 		if !confirmation.Ack {
-			return fmt.Errorf("RabbitMQ 拒绝确认 exchange=%q event_id=%d", exchange, eventID)
+			return fmt.Errorf("RabbitMQ 拒绝确认 exchange=%q event_id=%s", exchange, eventID)
 		}
 	case <-time.After(FavoritePublishTimeout):
 		// 超时后关闭通道，避免迟到的确认被错误地匹配到下一条消息。
 		broker.resetConnectionLocked()
-		return fmt.Errorf("等待 RabbitMQ 确认超时 exchange=%q event_id=%d", exchange, eventID)
+		return fmt.Errorf("等待 RabbitMQ 确认超时 exchange=%q event_id=%s", exchange, eventID)
+	}
+	if mandatory {
+		select {
+		case returned := <-broker.returns:
+			return fmt.Errorf("RabbitMQ 消息未路由到队列 exchange=%q event_id=%s reply=%s", exchange, eventID, returned.ReplyText)
+		default:
+		}
 	}
 	return nil
 }
@@ -305,12 +369,29 @@ func (broker *FavoriteEventBroker) ConsumeFavoriteCounts(ctx context.Context, ha
 	})
 }
 
+func (broker *FavoriteEventBroker) ConsumeCacheInvalidations(ctx context.Context, handler func(context.Context, CacheInvalidationEvent) error) error {
+	return broker.consume(ctx, CacheInvalidationExchange, CacheInvalidationQueue, func(body []byte) error {
+		var event CacheInvalidationEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			return invalidFavoriteMessage(fmt.Errorf("解析缓存失效消息失败: %w", err))
+		}
+		if err := event.Validate(); err != nil {
+			return invalidFavoriteMessage(err)
+		}
+		return handler(ctx, event)
+	})
+}
+
 func (broker *FavoriteEventBroker) RunFavoriteActions(ctx context.Context, handler func(context.Context, FavoriteActionEvent) error) {
 	broker.runConsumer(ctx, func() error { return broker.ConsumeFavoriteActions(ctx, handler) })
 }
 
 func (broker *FavoriteEventBroker) RunFavoriteCounts(ctx context.Context, handler func(context.Context, FavoriteCountEvent) error) {
 	broker.runConsumer(ctx, func() error { return broker.ConsumeFavoriteCounts(ctx, handler) })
+}
+
+func (broker *FavoriteEventBroker) RunCacheInvalidations(ctx context.Context, handler func(context.Context, CacheInvalidationEvent) error) {
+	broker.runConsumer(ctx, func() error { return broker.ConsumeCacheInvalidations(ctx, handler) })
 }
 
 func (broker *FavoriteEventBroker) runConsumer(ctx context.Context, consume func() error) {
