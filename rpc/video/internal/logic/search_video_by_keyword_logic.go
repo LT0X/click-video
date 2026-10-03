@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"douyin/rpc/video/internal/cache"
 	"douyin/rpc/video/internal/model"
 
 	"douyin/rpc/video/internal/svc"
@@ -29,6 +30,9 @@ func (l *SearchVideoByKeywordLogic) SearchVideoByKeyword(in *video.SearchVideoBy
 	var videos []*model.Video
 	err := l.svcCtx.DBList.Mysql.Raw("select * from video where match(title,topic) against(?) order by publish_time desc", in.Keyword).Scan(&videos).Error
 	if err != nil {
+		return nil, err
+	}
+	if err := cache.LoadFavoriteCounts(l.ctx, videos); err != nil {
 		return nil, err
 	}
 	return &video.SearchVideoByKeywordResponse{

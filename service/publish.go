@@ -10,6 +10,7 @@ import (
 	"douyin/package/util"
 	"douyin/response"
 	"douyin/rpc/user/user"
+	"douyin/rpc/video/video"
 	"strconv"
 	"time"
 
@@ -112,11 +113,14 @@ func (service *PublishListService) GetPublishVideos(loginUserID uint64) (*respon
 	// TODO 加分布式锁 redis
 	// TODO 这里其实应当先去redis拿列表 再去数据库拿数据
 
-	videos, err := database.SelectVideosByUserID(service.UserID)
+	videoResp, err := database.RPC.VideoRpc.SelectVideosByUserID(context.TODO(), &video.SelectVideosByUserIDRequest{
+		UserID: service.UserID,
+	})
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
 	}
+	videos := model.TransformVideoInfos(videoResp.Videos)
 	// 不都是一个作者嘛 拿一次信息不就好了
 	author, err := cache.GetUserInfo(service.UserID)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 
 var connRabbitMQ *amqp.Connection
 var produceChannel *amqp.Channel
+var favoriteBroker *FavoriteEventBroker
 
 func InitMQ() {
 	var err error
@@ -29,6 +30,10 @@ func InitMQ() {
 	produceChannel, err = connRabbitMQ.Channel()
 	if err != nil {
 		zap.L().Error("创建channel失败", zap.Error(err))
+	}
+	favoriteBroker, err = NewFavoriteEventBroker(config.System.MQ)
+	if err != nil {
+		zap.L().Fatal("创建点赞事件 broker 失败", zap.Error(err))
 	}
 	// 不能使用defer关闭
 	// defer produceChannel.Close()
@@ -62,5 +67,4 @@ func InitMQ() {
 	}()
 	initRelation()
 	initComment()
-	initFavorite()
 }

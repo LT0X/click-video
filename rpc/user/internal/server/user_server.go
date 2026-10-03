@@ -58,6 +58,11 @@ func (s *UserServer) FavoriteVideo(ctx context.Context, in *user.FavoriteVideoRe
 	return l.FavoriteVideo(in)
 }
 
+func (s *UserServer) ReserveFavoriteActionSequence(ctx context.Context, in *user.ReserveFavoriteActionSequenceRequest) (*user.ReserveFavoriteActionSequenceResponse, error) {
+	l := logic.NewReserveFavoriteActionSequenceLogic(ctx, s.svcCtx)
+	return l.ReserveFavoriteActionSequence(in)
+}
+
 func (s *UserServer) SelectFavoriteVideoByUserID(ctx context.Context, in *user.SelectFavoriteVideoByUserIDRequest) (*user.SelectFavoriteVideoByUserIDResponse, error) {
 	l := logic.NewSelectFavoriteVideoByUserIDLogic(ctx, s.svcCtx)
 	return l.SelectFavoriteVideoByUserID(in)

@@ -7,9 +7,13 @@ import (
 	"douyin/package/cache"
 	"douyin/package/constant"
 	"douyin/package/mq"
+	"douyin/package/util"
 	"douyin/response"
 	"douyin/rpc/user/user"
+	"douyin/rpc/video/video"
+	"errors"
 	"github.com/zeromicro/go-zero/core/mr"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -27,7 +31,7 @@ type FavoriteService struct {
 
 func (service *FavoriteService) Favorite(userID uint64) (*response.CommonResponse, error) {
 	// TODO 可以拿redis限制一下用户点赞的速率 比如1分钟只能点赞10次
-	err := mq.SendFavoriteMessage(userID, service.VideoID, 1)
+	err := service.sendFavoriteAction(userID, 1)
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
@@ -39,7 +43,7 @@ func (service *FavoriteService) Favorite(userID uint64) (*response.CommonRespons
 }
 
 func (service *FavoriteService) UnFavorite(userID uint64) (*response.CommonResponse, error) {
-	err := mq.SendFavoriteMessage(userID, service.VideoID, -1)
+	err := service.sendFavoriteAction(userID, -1)
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
@@ -48,6 +52,39 @@ func (service *FavoriteService) UnFavorite(userID uint64) (*response.CommonRespo
 		StatusCode: response.Success,
 		StatusMsg:  constant.UnFavoriteSuccess,
 	}, nil
+}
+
+func (service *FavoriteService) sendFavoriteAction(userID uint64, delta int64) error {
+	eventID, err := util.GetSonyFlakeID()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sequenceResp, err := database.RPC.UserRpc.ReserveFavoriteActionSequence(ctx, &user.ReserveFavoriteActionSequenceRequest{
+		UserID:  userID,
+		VideoID: service.VideoID,
+	})
+	if err != nil {
+		return err
+	}
+	videoInfo, err := database.RPC.VideoRpc.SelectVideoListByVideoID(ctx, &video.SelectVideoListByVideoIDRequest{
+		VideoIDList: []uint64{service.VideoID},
+	})
+	if err != nil {
+		return err
+	}
+	if len(videoInfo.Videos) == 0 || videoInfo.Videos[0].AuthorID == 0 {
+		return errors.New(constant.BadParaRequest)
+	}
+	return mq.SendFavoriteMessage(mq.FavoriteActionEvent{
+		EventID:        eventID,
+		ActionSequence: sequenceResp.Sequence,
+		UserID:         userID,
+		AuthorID:       videoInfo.Videos[0].AuthorID,
+		VideoID:        service.VideoID,
+		Cnt:            delta,
+	})
 }
 
 func (service *FavoriteService) FavoriteList(userID uint64) ([]response.Video, error) {
@@ -83,11 +120,14 @@ func (service *FavoriteService) FavoriteList(userID uint64) ([]response.Video, e
 	// 那么走redis查到的数据是乱序的（用zset解决 但是代码复杂）
 
 	//确定拿mapReduce 优化
-	videos, err := database.SelectVideoListByVideoID(videoIDs)
+	videoResp, err := database.RPC.VideoRpc.SelectVideoListByVideoID(context.TODO(), &video.SelectVideoListByVideoIDRequest{
+		VideoIDList: videoIDs,
+	})
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
 	}
+	videos := model.TransformVideoInfos(videoResp.Videos)
 
 	// 拿到视频数据之后 还得一个视频一个视频拿到作者信息
 	userIDs := make([]uint64, 0, len(videoIDs))

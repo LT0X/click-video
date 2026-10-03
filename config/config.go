@@ -1,7 +1,10 @@
 package config
 
 import (
+	"errors"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -60,6 +63,33 @@ type SystemConfig struct {
 }
 
 var System SystemConfig
+
+// LoadRabbitMQ 让独立 RPC 进程复用网关的 RabbitMQ 配置，不在各服务配置中复制凭据。
+func LoadRabbitMQ() (RabbitMQ, error) {
+	paths := []string{os.Getenv("CLICK_VIDEO_CONFIG"), filepath.Join("config", "config.yaml"), filepath.Join("..", "..", "config", "config.yaml")}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		loader := viper.New()
+		loader.SetConfigFile(path)
+		if err := loader.ReadInConfig(); err != nil {
+			return RabbitMQ{}, errors.New("读取 RabbitMQ 配置文件失败")
+		}
+		var rabbitMQ RabbitMQ
+		if err := loader.UnmarshalKey("rabbitmq", &rabbitMQ); err != nil {
+			return RabbitMQ{}, errors.New("解析 RabbitMQ 配置失败")
+		}
+		if rabbitMQ.Host == "" || rabbitMQ.Port == "" || rabbitMQ.User == "" {
+			return RabbitMQ{}, errors.New("RabbitMQ 配置缺少 host、port 或 user")
+		}
+		return rabbitMQ, nil
+	}
+	return RabbitMQ{}, errors.New("未找到 config/config.yaml；可通过 CLICK_VIDEO_CONFIG 指定")
+}
 
 func Init() {
 	viper.SetConfigName("config")

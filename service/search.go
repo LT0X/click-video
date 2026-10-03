@@ -8,6 +8,7 @@ import (
 	"douyin/package/constant"
 	"douyin/response"
 	"douyin/rpc/user/user"
+	"douyin/rpc/video/video"
 	"errors"
 
 	"go.uber.org/zap"
@@ -25,11 +26,14 @@ func (service *SearchService) SearchVideo(userID uint64) (*response.VideoListRes
 		return nil, errors.New(constant.BadParaRequest)
 	}
 	// 去数据库利用全文索引拿出所有视频数据
-	videos, err := database.SearchVideoByKeyword(service.KeyWord)
+	videoResp, err := database.RPC.VideoRpc.SearchVideoByKeyword(context.TODO(), &video.SearchVideoByKeywordRequest{
+		Keyword: service.KeyWord,
+	})
 	if err != nil {
 		zap.L().Error(err.Error())
 		return nil, err
 	}
+	videos := model.TransformVideoInfos(videoResp.VideInfos)
 
 	// 拿到视频数据之后 还得一个视频一个视频拿到作者信息
 	userIDs := make([]uint64, 0, len(videos))

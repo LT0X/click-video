@@ -1,6 +1,7 @@
 package model
 
 import (
+	"douyin/rpc/video/video"
 	"time"
 )
 
@@ -18,6 +19,28 @@ type Video struct {
 	CommentCount  int64     `gorm:"default:0;not null" json:"comment_count"`
 	// 视频的分类 23.11.03新增 前两个为固定字段 后面为tag隐式搜索
 	Topic string `gorm:"type:varchar(63);index:idx_title_topic,class:FULLTEXT,option:WITH PARSER ngram;not null" json:"topic"`
+}
+
+func TransformVideoInfo(info *video.VideoInfo) Video {
+	return Video{
+		ID:            info.ID,
+		AuthorID:      info.AuthorID,
+		PlayURL:       info.PlayURL,
+		CoverURL:      info.CoverURL,
+		Title:         info.Title,
+		PublishTime:   time.UnixMilli(info.PublishTime),
+		FavoriteCount: info.FavoriteCount,
+		CommentCount:  info.CommentCount,
+		Topic:         info.Topic,
+	}
+}
+
+func TransformVideoInfos(infos []*video.VideoInfo) []Video {
+	result := make([]Video, len(infos))
+	for i, info := range infos {
+		result[i] = TransformVideoInfo(info)
+	}
+	return result
 }
 
 //func TransformVideoData(in []*video.VideoData) []response.VideoData {
