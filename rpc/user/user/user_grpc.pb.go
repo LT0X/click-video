@@ -26,6 +26,7 @@ const (
 	User_SelectUserByName_FullMethodName              = "/user.User/SelectUserByName"
 	User_SelectUserByID_FullMethodName                = "/user.User/SelectUserByID"
 	User_SelectWorkCount_FullMethodName               = "/user.User/SelectWorkCount"
+	User_IncrementWorkCount_FullMethodName            = "/user.User/IncrementWorkCount"
 	User_SelectUserListByIDs_FullMethodName           = "/user.User/SelectUserListByIDs"
 	User_FavoriteVideo_FullMethodName                 = "/user.User/FavoriteVideo"
 	User_ReserveFavoriteActionSequence_FullMethodName = "/user.User/ReserveFavoriteActionSequence"
@@ -43,6 +44,7 @@ type UserClient interface {
 	SelectUserByName(ctx context.Context, in *SelectUserByNameRequest, opts ...grpc.CallOption) (*SelectUserByNameResponse, error)
 	SelectUserByID(ctx context.Context, in *SelectUserByIDRequest, opts ...grpc.CallOption) (*SelectUserByIDResponse, error)
 	SelectWorkCount(ctx context.Context, in *SelectWorkCountRequest, opts ...grpc.CallOption) (*SelectWorkCountResponse, error)
+	IncrementWorkCount(ctx context.Context, in *IncrementWorkCountRequest, opts ...grpc.CallOption) (*IncrementWorkCountResponse, error)
 	SelectUserListByIDs(ctx context.Context, in *SelectUserListByIDsRequest, opts ...grpc.CallOption) (*SelectUserListByIDsResponse, error)
 	FavoriteVideo(ctx context.Context, in *FavoriteVideoRequest, opts ...grpc.CallOption) (*FavoriteVideoResponse, error)
 	ReserveFavoriteActionSequence(ctx context.Context, in *ReserveFavoriteActionSequenceRequest, opts ...grpc.CallOption) (*ReserveFavoriteActionSequenceResponse, error)
@@ -103,6 +105,16 @@ func (c *userClient) SelectWorkCount(ctx context.Context, in *SelectWorkCountReq
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SelectWorkCountResponse)
 	err := c.cc.Invoke(ctx, User_SelectWorkCount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userClient) IncrementWorkCount(ctx context.Context, in *IncrementWorkCountRequest, opts ...grpc.CallOption) (*IncrementWorkCountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IncrementWorkCountResponse)
+	err := c.cc.Invoke(ctx, User_IncrementWorkCount_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +190,7 @@ type UserServer interface {
 	SelectUserByName(context.Context, *SelectUserByNameRequest) (*SelectUserByNameResponse, error)
 	SelectUserByID(context.Context, *SelectUserByIDRequest) (*SelectUserByIDResponse, error)
 	SelectWorkCount(context.Context, *SelectWorkCountRequest) (*SelectWorkCountResponse, error)
+	IncrementWorkCount(context.Context, *IncrementWorkCountRequest) (*IncrementWorkCountResponse, error)
 	SelectUserListByIDs(context.Context, *SelectUserListByIDsRequest) (*SelectUserListByIDsResponse, error)
 	FavoriteVideo(context.Context, *FavoriteVideoRequest) (*FavoriteVideoResponse, error)
 	ReserveFavoriteActionSequence(context.Context, *ReserveFavoriteActionSequenceRequest) (*ReserveFavoriteActionSequenceResponse, error)
@@ -208,6 +221,9 @@ func (UnimplementedUserServer) SelectUserByID(context.Context, *SelectUserByIDRe
 }
 func (UnimplementedUserServer) SelectWorkCount(context.Context, *SelectWorkCountRequest) (*SelectWorkCountResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SelectWorkCount not implemented")
+}
+func (UnimplementedUserServer) IncrementWorkCount(context.Context, *IncrementWorkCountRequest) (*IncrementWorkCountResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IncrementWorkCount not implemented")
 }
 func (UnimplementedUserServer) SelectUserListByIDs(context.Context, *SelectUserListByIDsRequest) (*SelectUserListByIDsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SelectUserListByIDs not implemented")
@@ -334,6 +350,24 @@ func _User_SelectWorkCount_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(UserServer).SelectWorkCount(ctx, req.(*SelectWorkCountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _User_IncrementWorkCount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IncrementWorkCountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServer).IncrementWorkCount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: User_IncrementWorkCount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServer).IncrementWorkCount(ctx, req.(*IncrementWorkCountRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -472,6 +506,10 @@ var User_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SelectWorkCount",
 			Handler:    _User_SelectWorkCount_Handler,
+		},
+		{
+			MethodName: "IncrementWorkCount",
+			Handler:    _User_IncrementWorkCount_Handler,
 		},
 		{
 			MethodName: "SelectUserListByIDs",

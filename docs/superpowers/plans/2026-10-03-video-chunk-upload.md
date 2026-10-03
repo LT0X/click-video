@@ -17,7 +17,7 @@
 - Redis 上传状态有效期以 24h 为基础并增加随机偏移；临时目录每 30 分钟清理过期项；不使用 Redis `KEYS`。
 - 最大合并并发为 3；客户端分片大小为 5MiB、客户端 MD5 分块读取为 2MiB、分片数上限为 10,000（可上传至约 50GiB）。
 - user 表只由 user.rpc 更新，video 表只由 video.rpc 更新；新增 Redis key 和配置同步登记到 README。
-- 中文注释；新增依赖仅限于浏览器 MD5 所需的 SparkMD5，不引入 Go 运行时依赖。
+- 中文注释；新增业务依赖仅限于浏览器 MD5 所需的 SparkMD5；Go SQL mock 仅用于验证 RPC 数据库事务。
 - 不提交 `temp/`、`.gitignore` 改动或凭据；逐文件暂存。
 
 ## Review Focus
@@ -72,7 +72,7 @@
 - [x] 写测试：`TestRandomizedUploadTTLStaysWithinWindow` 验证 TTL 在 24h 到 24h+5m 范围内。
 - [x] 写测试：`TestApplyUploadDefaultsUsesBoundedDefaults` 验证未配置时默认使用 5MiB 分片、10MiB 单片、10,000 片、24h TTL 和 30min 清理间隔。
 - [x] 确认测试先失败，再实现 Redis 状态适配器、配置默认值和清理 worker。
-- [ ] 提交 Task 2：`feat(upload): 上传状态续传与过期清理`。
+- [x] 提交 Task 2：`feat(upload): 上传状态续传与过期清理`。
 
 ### Task 3: 视频发布的 RPC 所有权与幂等性
 
@@ -98,10 +98,10 @@
 - 新增 user.rpc `IncrementWorkCount(UserID, VideoID)`；通过 user 域的唯一 video ledger 保证重试只增加一次 `work_count`。
 - 既有发布服务和新合并流程都经 RPC 写入各服务表，不在网关直接创建 video 或更新 user 表。
 
-- [ ] 写测试：upload ID 重试解析到同一视频 ID；空标题/作者/必需 URL 被拒绝。
-- [ ] 写测试：同一 video ID 重试作品数更新只应用一次，未知用户返回错误。
-- [ ] 确认测试失败后，实现 RPC schema、数据库唯一约束、服务逻辑和 generated stubs。
-- [ ] 使既有 `/douyin/publish/action/` 改走 video.rpc/user.rpc，保留请求路径和 `CommonResponse` 字段。
+- [x] 写测试：upload ID 重试解析到同一视频 ID；空标题/作者/必需 URL 被拒绝。
+- [x] 写测试：同一 video ID 重试作品数更新只应用一次，未知用户返回错误。
+- [x] 确认测试失败后，实现 RPC schema、数据库唯一约束、服务逻辑和 generated stubs。
+- [x] 使既有 `/douyin/publish/action/` 改走 video.rpc/user.rpc，保留请求路径和 `CommonResponse` 字段。
 - [ ] 提交 Task 3：`feat(upload): 通过 RPC 幂等发布视频`。
 
 ### Task 4: HTTP init/chunk/merge 与 Fiber 流式接入

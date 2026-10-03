@@ -53,6 +53,7 @@ message Comment{
 
 message CreateVideoRequest{
     VideoInfo  VideoID = 1;
+    string UploadID = 2;
 }
 
 message CreateVideoResponse{

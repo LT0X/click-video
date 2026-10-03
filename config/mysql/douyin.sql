@@ -203,6 +203,17 @@ LOCK TABLES `user` WRITE;
 UNLOCK TABLES;
 
 --
+-- Work-count idempotency ledger owned by user.rpc
+--
+DROP TABLE IF EXISTS `work_count_video`;
+CREATE TABLE `work_count_video` (
+  `video_id` bigint unsigned NOT NULL,
+  `user_id` bigint unsigned NOT NULL,
+  PRIMARY KEY (`video_id`),
+  KEY `idx_work_count_video_user_id` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+--
 -- Table structure for table `video`
 --
 
@@ -211,6 +222,7 @@ DROP TABLE IF EXISTS `video`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `video` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `upload_id` varchar(36) NOT NULL,
   `author_id` bigint unsigned NOT NULL,
   `play_url` varchar(256) NOT NULL,
   `cover_url` varchar(256) NOT NULL,
@@ -220,6 +232,7 @@ CREATE TABLE `video` (
   `comment_count` bigint NOT NULL DEFAULT '0',
   `topic` varchar(63) NOT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_video_upload_id` (`upload_id`),
   KEY `idx_video_author_id` (`author_id`),
   KEY `idx_video_publish_time` (`publish_time`),
   FULLTEXT KEY `idx_title_topic` (`title`,`topic`) /*!50100 WITH PARSER `ngram` */ 

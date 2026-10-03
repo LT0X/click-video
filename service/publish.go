@@ -11,6 +11,8 @@ import (
 	"douyin/response"
 	"douyin/rpc/user/user"
 	"douyin/rpc/video/video"
+	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -55,51 +57,31 @@ func (service *PublisService) PublishAction(userID uint64, buf *bytes.Buffer) (*
 	default:
 		service.Topic = constant.TopicDefualt + service.Topic
 	}
-	video_id, err := database.CreateVideo(&model.Video{
-		PublishTime:   time.Now(),
-		AuthorID:      userID,
-		PlayURL:       playURL,
-		CoverURL:      coverURL,
-		FavoriteCount: 0,
-		CommentCount:  0,
-		Title:         service.Title,
-		Topic:         service.Topic,
+	created, err := database.RPC.VideoRpc.CreateVideo(context.Background(), &video.CreateVideoRequest{
+		UploadID: u1.String(),
+		VideoID: &video.VideoInfo{
+			AuthorID:    userID,
+			PlayURL:     playURL,
+			CoverURL:    coverURL,
+			Title:       service.Title,
+			Topic:       service.Topic,
+			PublishTime: time.Now().UnixMilli(),
+		},
 	})
 	if err != nil {
-		zap.L().Error(err.Error())
-		return nil, err
+		return nil, fmt.Errorf("通过 video.rpc 创建视频失败: %w", err)
 	}
-	//加入布隆过滤器
-	cache.VideoIDBloomFilter.AddString(strconv.FormatUint(video_id, 10))
-	// 异步上传到对象存储
-	//go func() {
-	//	localVideoPath := config.System.HttpAddress.VideoAddress + "/" + fileName
-	//	err := util.UploadToOSS(fileName, localVideoPath)
-	//	if err != nil {
-	//		//
-	//		zap.L().Error(err.Error())
-	//		return
-	//	}
-	//	coverURL = u1.String() + "." + "jpg"
-	//	err = database.UpdateVideoURL(playURL, coverURL, video_id)
-	//	if err != nil {
-	//		zap.L().Error(err.Error())
-	//	}
-	//	// 这里会有主从复制延时导致缓存不一致的问题。。
-	//	// 对于即时写即时读的要指定主库去读 不能读从库
-	//	var video model.Video
-	//	err = constant.DB.Clauses(dbresolver.Write).Where("id = ?", video_id).First(&video).Error
-	//	if err != nil {
-	//		zap.L().Error(err.Error())
-	//		return
-	//	}
-	//	cache.SetVideoInfo(&video)
-	//	// 删除本地的视频
-	//	err = os.Remove(localVideoPath)
-	//	if err != nil {
-	//		zap.L().Error(err.Error())
-	//	}
-	//}()
+	if created == nil || created.VideoID == 0 {
+		return nil, errors.New("video.rpc 返回了无效的视频 ID")
+	}
+	cache.VideoIDBloomFilter.AddString(strconv.FormatUint(created.VideoID, 10))
+	_, err = database.RPC.UserRpc.IncrementWorkCount(context.Background(), &user.IncrementWorkCountRequest{
+		UserID:  userID,
+		VideoID: created.VideoID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("通过 user.rpc 更新作品数失败: %w", err)
+	}
 	return &response.CommonResponse{
 		StatusCode: response.Success,
 		StatusMsg:  response.UploadVideoSuccess,

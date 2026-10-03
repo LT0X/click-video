@@ -2,38 +2,10 @@ package database
 
 import (
 	"douyin/model"
-	"douyin/package/cache"
 	"douyin/package/constant"
 	"douyin/response"
 	"time"
-
-	"gorm.io/gorm"
 )
-
-// CreateVideo 新增视频，返回的 videoID 是为了将 videoID 放入布隆过滤器
-// 这里简单的先写到数据库 后序使用redis + 布隆过滤器
-func CreateVideo(video *model.Video) (uint64, error) {
-	err := constant.DB.Transaction(func(tx *gorm.DB) error {
-		// If value doesn't contain a matching primary key, value is inserted.
-		err := tx.Create(video).Error
-		if err != nil {
-			return err
-		}
-		cnt, err := SelectWorkCount(video.AuthorID)
-		if err != nil {
-			return err
-		}
-		err = tx.Model(&model.User{}).Where("id = ?", video.AuthorID).Update("work_count", cnt+1).Error
-		if err != nil {
-			return err
-		}
-		return cache.PublishVideo(video.AuthorID, video.ID)
-	})
-	if err != nil {
-		return 0, err
-	}
-	return video.ID, nil
-}
 
 // service/publish.go 119
 func SelectVideosByUserID(userID uint64) ([]model.Video, error) {

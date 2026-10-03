@@ -18,9 +18,11 @@ type (
 	CreateUserResponse                    = user.CreateUserResponse
 	FavoriteVideoRequest                  = user.FavoriteVideoRequest
 	FavoriteVideoResponse                 = user.FavoriteVideoResponse
+	IncrementWorkCountRequest             = user.IncrementWorkCountRequest
+	IncrementWorkCountResponse            = user.IncrementWorkCountResponse
+	Request                               = user.Request
 	ReserveFavoriteActionSequenceRequest  = user.ReserveFavoriteActionSequenceRequest
 	ReserveFavoriteActionSequenceResponse = user.ReserveFavoriteActionSequenceResponse
-	Request                               = user.Request
 	Response                              = user.Response
 	SearchUserRequest                     = user.SearchUserRequest
 	SearchUserResponse                    = user.SearchUserResponse
@@ -44,6 +46,7 @@ type (
 		SelectUserByName(ctx context.Context, in *SelectUserByNameRequest, opts ...grpc.CallOption) (*SelectUserByNameResponse, error)
 		SelectUserByID(ctx context.Context, in *SelectUserByIDRequest, opts ...grpc.CallOption) (*SelectUserByIDResponse, error)
 		SelectWorkCount(ctx context.Context, in *SelectWorkCountRequest, opts ...grpc.CallOption) (*SelectWorkCountResponse, error)
+		IncrementWorkCount(ctx context.Context, in *IncrementWorkCountRequest, opts ...grpc.CallOption) (*IncrementWorkCountResponse, error)
 		SelectUserListByIDs(ctx context.Context, in *SelectUserListByIDsRequest, opts ...grpc.CallOption) (*SelectUserListByIDsResponse, error)
 		FavoriteVideo(ctx context.Context, in *FavoriteVideoRequest, opts ...grpc.CallOption) (*FavoriteVideoResponse, error)
 		ReserveFavoriteActionSequence(ctx context.Context, in *ReserveFavoriteActionSequenceRequest, opts ...grpc.CallOption) (*ReserveFavoriteActionSequenceResponse, error)
@@ -86,6 +89,11 @@ func (m *defaultUser) SelectUserByID(ctx context.Context, in *SelectUserByIDRequ
 func (m *defaultUser) SelectWorkCount(ctx context.Context, in *SelectWorkCountRequest, opts ...grpc.CallOption) (*SelectWorkCountResponse, error) {
 	client := user.NewUserClient(m.cli.Conn())
 	return client.SelectWorkCount(ctx, in, opts...)
+}
+
+func (m *defaultUser) IncrementWorkCount(ctx context.Context, in *IncrementWorkCountRequest, opts ...grpc.CallOption) (*IncrementWorkCountResponse, error) {
+	client := user.NewUserClient(m.cli.Conn())
+	return client.IncrementWorkCount(ctx, in, opts...)
 }
 
 func (m *defaultUser) SelectUserListByIDs(ctx context.Context, in *SelectUserListByIDsRequest, opts ...grpc.CallOption) (*SelectUserListByIDsResponse, error) {
