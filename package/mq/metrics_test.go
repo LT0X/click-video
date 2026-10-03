@@ -53,6 +53,47 @@ func TestQueueDepthInspectionReturnsFixedQueueSamples(t *testing.T) {
 	}
 }
 
+func TestQueueDepthInspectionUsesIndependentChannelForEveryQueue(t *testing.T) {
+	channelCount := 0
+	samples := inspectQueueDepthsWithChannels(func() (queueInspectionChannel, error) {
+		channelCount++
+		return &fakeQueueInspectionChannel{failInspection: channelCount == 1}, nil
+	})
+
+	if channelCount != len(monitoredQueueNames) {
+		t.Fatalf("opened %d channels, want one channel per queue (%d)", channelCount, len(monitoredQueueNames))
+	}
+	if len(samples) != len(monitoredQueueNames) || samples[0].Err == nil {
+		t.Fatalf("first queue should report its missing-queue error: %+v", samples)
+	}
+	for _, sample := range samples[1:] {
+		if sample.Err != nil || sample.Messages != 3 {
+			t.Errorf("queue %q was affected by another queue's channel error: %+v", sample.Queue, sample)
+		}
+	}
+}
+
+type fakeQueueInspectionChannel struct {
+	failInspection bool
+	closed         bool
+}
+
+func (channel *fakeQueueInspectionChannel) InspectQueueDepth(string) (int, error) {
+	if channel.closed {
+		return 0, errors.New("channel is closed")
+	}
+	if channel.failInspection {
+		channel.closed = true
+		return 0, errors.New("queue does not exist")
+	}
+	return 3, nil
+}
+
+func (channel *fakeQueueInspectionChannel) Close() error {
+	channel.closed = true
+	return nil
+}
+
 func TestQueueDepthSamplesRetainGaugeWhenInspectionFails(t *testing.T) {
 	registry := metrics.NewRegistry()
 	applyQueueDepthSamples(registry, []QueueDepthSample{{Queue: FavoriteUserQueue, Messages: 9}})

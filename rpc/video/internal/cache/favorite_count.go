@@ -155,15 +155,14 @@ func LoadFavoriteCounts(ctx context.Context, videos []*model.Video) error {
 		return nil
 	}
 	startedAt := time.Now()
-	defer func() {
-		metrics.Default.ObserveFavoriteCountLookup(time.Since(startedAt))
-	}()
 	pipe := VideoRedisClient.Pipeline()
 	commands := make([]*redis.StringCmd, len(videos))
 	for i, video := range videos {
 		commands[i] = pipe.HGet(favoriteCountKey(video.ID), constant.FavoritedCountField)
 	}
 	_, pipelineErr := pipe.Exec()
+	// 只记录 Hash 批量读取耗时，后续的视频访问频次写入属于另一条 Redis 操作。
+	metrics.Default.ObserveFavoriteCountLookup(time.Since(startedAt))
 	if pipelineErr != nil && pipelineErr != redis.Nil {
 		zap.L().Warn("Pipeline 读取视频点赞计数失败，使用数据库值", zap.Error(pipelineErr))
 	}
