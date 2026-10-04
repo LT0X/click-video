@@ -6,6 +6,7 @@ import (
 	"douyin/response"
 	"douyin/service"
 	"fmt"
+	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
@@ -25,10 +26,11 @@ func FavoriteVideoAction(c *fiber.Ctx) error {
 	}
 	userID := c.Locals(constant.UserID).(uint64)
 	var resp *response.CommonResponse
+	var favoriteCount *int64
 	if service.ActionType == constant.DoAction {
-		resp, err = service.Favorite(userID)
+		resp, favoriteCount, err = service.Favorite(userID)
 	} else if service.ActionType == constant.UndoAction {
-		resp, err = service.UnFavorite(userID)
+		resp, favoriteCount, err = service.UnFavorite(userID)
 	} else {
 		err = fmt.Errorf(constant.BadParaRequest)
 	}
@@ -40,8 +42,16 @@ func FavoriteVideoAction(c *fiber.Ctx) error {
 		c.Status(fiber.StatusOK)
 		return c.JSON(res)
 	}
+	setFavoriteCountResponseHeaders(c, favoriteCount)
 	c.Status(fiber.StatusOK)
 	return c.JSON(resp)
+}
+
+func setFavoriteCountResponseHeaders(c *fiber.Ctx, favoriteCount *int64) {
+	c.Set("Access-Control-Expose-Headers", "X-Favorite-Count")
+	if favoriteCount != nil && *favoriteCount >= 0 {
+		c.Set("X-Favorite-Count", strconv.FormatInt(*favoriteCount, 10))
+	}
 }
 
 func FavoriteList(c *fiber.Ctx) error {
