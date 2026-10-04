@@ -30,33 +30,43 @@ type FavoriteService struct {
 	UserID uint64 `query:"user_id"`
 }
 
-func (service *FavoriteService) Favorite(userID uint64) (*response.CommonResponse, error) {
+func (service *FavoriteService) Favorite(userID uint64) (*response.CommonResponse, *int64, error) {
 	// TODO 可以拿redis限制一下用户点赞的速率 比如1分钟只能点赞10次
 	startedAt := time.Now()
-	err := service.sendFavoriteAction(userID, 1)
-	recordFavoriteRequestMetrics(metrics.Default, "favorite", err, time.Since(startedAt))
+	eventID, err := service.sendFavoriteAction(userID, 1)
 	if err != nil {
+		recordFavoriteRequestMetrics(metrics.Default, "favorite", err, time.Since(startedAt))
 		zap.L().Error(err.Error())
-		return nil, err
+		return nil, nil, err
 	}
+	var favoriteCount *int64
+	if count, ok := cache.WaitFavoriteActionCount(eventID); ok {
+		favoriteCount = &count
+	}
+	recordFavoriteRequestMetrics(metrics.Default, "favorite", nil, time.Since(startedAt))
 	return &response.CommonResponse{
 		StatusCode: response.Success,
 		StatusMsg:  constant.FavoriteSuccess,
-	}, nil
+	}, favoriteCount, nil
 }
 
-func (service *FavoriteService) UnFavorite(userID uint64) (*response.CommonResponse, error) {
+func (service *FavoriteService) UnFavorite(userID uint64) (*response.CommonResponse, *int64, error) {
 	startedAt := time.Now()
-	err := service.sendFavoriteAction(userID, -1)
-	recordFavoriteRequestMetrics(metrics.Default, "unfavorite", err, time.Since(startedAt))
+	eventID, err := service.sendFavoriteAction(userID, -1)
 	if err != nil {
+		recordFavoriteRequestMetrics(metrics.Default, "unfavorite", err, time.Since(startedAt))
 		zap.L().Error(err.Error())
-		return nil, err
+		return nil, nil, err
 	}
+	var favoriteCount *int64
+	if count, ok := cache.WaitFavoriteActionCount(eventID); ok {
+		favoriteCount = &count
+	}
+	recordFavoriteRequestMetrics(metrics.Default, "unfavorite", nil, time.Since(startedAt))
 	return &response.CommonResponse{
 		StatusCode: response.Success,
 		StatusMsg:  constant.UnFavoriteSuccess,
-	}, nil
+	}, favoriteCount, nil
 }
 
 func recordFavoriteRequestMetrics(registry *metrics.Registry, action string, requestErr error, duration time.Duration) {
@@ -67,10 +77,10 @@ func recordFavoriteRequestMetrics(registry *metrics.Registry, action string, req
 	registry.ObserveFavoriteRequest(action, result, duration)
 }
 
-func (service *FavoriteService) sendFavoriteAction(userID uint64, delta int64) error {
+func (service *FavoriteService) sendFavoriteAction(userID uint64, delta int64) (uint64, error) {
 	eventID, err := util.GetSonyFlakeID()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -79,25 +89,28 @@ func (service *FavoriteService) sendFavoriteAction(userID uint64, delta int64) e
 		VideoID: service.VideoID,
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	videoInfo, err := database.RPC.VideoRpc.SelectVideoListByVideoID(ctx, &video.SelectVideoListByVideoIDRequest{
 		VideoIDList: []uint64{service.VideoID},
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(videoInfo.Videos) == 0 || videoInfo.Videos[0].AuthorID == 0 {
-		return errors.New(constant.BadParaRequest)
+		return 0, errors.New(constant.BadParaRequest)
 	}
-	return mq.SendFavoriteMessage(mq.FavoriteActionEvent{
+	if err := mq.SendFavoriteMessage(mq.FavoriteActionEvent{
 		EventID:        eventID,
 		ActionSequence: sequenceResp.Sequence,
 		UserID:         userID,
 		AuthorID:       videoInfo.Videos[0].AuthorID,
 		VideoID:        service.VideoID,
 		Cnt:            delta,
-	})
+	}); err != nil {
+		return 0, err
+	}
+	return eventID, nil
 }
 
 func (service *FavoriteService) FavoriteList(userID uint64) ([]response.Video, error) {

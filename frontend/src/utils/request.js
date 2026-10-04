@@ -21,6 +21,7 @@ api.interceptors.request.use(function (config) {
 api.interceptors.response.use(function (response) {
     if (response.status === 200 && response.data?.status_code === 0) {
         message.success(response.data?.status_msg);
+        if (response.config?.returnFullResponse) return response;
         return response.data;
     }
     else if (response.status === 401) {

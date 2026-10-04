@@ -10,6 +10,7 @@ import { useNavigate } from "react-router";
 import SharePopover from "./SharePopover";
 import { hideComments, showComments, showLogin } from "../redux/actions/popoverAction";
 import { changeVideos } from "../redux/actions/videosAction";
+import { favoriteCountAfterAction } from "../utils/favoriteCount";
 
 function Sidebar({ video }) {
   const dispatch = useDispatch();
@@ -26,12 +27,10 @@ function Sidebar({ video }) {
     }
     video?.is_favorite
       ? postCancelLike(video?.id, token)
-        .then(() => {
+        .then((res) => {
           dispatch(
             changeVideos(video?.id, {
-              favorite_count: video?.is_favorite
-                ? parseInt(video.favorite_count - 1)
-                : parseInt(video.favorite_count + 1),
+              favorite_count: favoriteCountAfterAction(res?.headers, video?.favorite_count, video?.is_favorite),
               is_favorite: !video.is_favorite,
             })
           )
@@ -40,9 +39,7 @@ function Sidebar({ video }) {
         .then((res) => {
           dispatch(
             changeVideos(video?.id, {
-              favorite_count: video?.is_favorite
-                ? parseInt(video.favorite_count - 1)
-                : parseInt(video.favorite_count + 1),
+              favorite_count: favoriteCountAfterAction(res?.headers, video?.favorite_count, video?.is_favorite),
               is_favorite: !video.is_favorite,
             })
           );

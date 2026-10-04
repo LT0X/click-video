@@ -303,6 +303,7 @@ Handler 层职责统一：**参数解析 + 鉴权 + 调用 service + 包装 resp
 点赞计数维护流程：
 
 - `user.rpc` 在同一事务更新点赞关系、计数和 Outbox；每个视频维护单调递增的 `count_version`。发布器收到 broker confirm 后标记 Outbox，失败时可重发同一事件。
+- 网关以点赞动作 `EventID` 等待最多 1 秒；user.rpc 提交事务后尽力将当前计数写入 DB0 的临时结果 Key。取到结果时通过 `X-Favorite-Count` 响应头返回，超时或 Redis 不可用时仍返回原 JSON，由前端保留乐观更新。该可选结果写入失败只记日志并 ACK，不触发点赞业务重试。
 - `video.rpc` 每次消费 delta 时用 Lua 比较版本，并在连续事件时 `HINCRBY`；若事件乱序或缓存缺失则用事件携带的绝对计数校准。Lua 同时写入脏视频 Set；event ID 去重 7 天，长期版本 Hash 防止旧事件覆盖新值。
 - 每 10 秒最多 `SPopN` 1000 个脏 ID，Pipeline 读 Hash，再以一条 `CASE WHEN` SQL 刷入 video 表；失败的 ID 放回 Set。
 - `user.rpc` 每 30 分钟在同一数据库快照中按 favorite 表 `COUNT(*) GROUP BY video_id` 并读取版本状态，再发送权威快照；状态表保留归零视频，快照只会覆盖不比当前版本旧的 Redis 值，随后由刷盘任务更新 video 表。
@@ -554,6 +555,7 @@ sum(rate(click_video_favorite_count_cache_access_total{result="hit"}[5m]))
 | `follow_id:{id}` | Set | 关注集合（DB0） |
 | `follower_id:{id}` | Set | 粉丝集合（DB0） |
 | `favorite_id:{id}` | Set | 点赞视频集合（DB0） |
+| `favorite_action_result:{eventID}` | List | 点赞动作已提交后的临时计数结果，网关用 `BLPOP` 关联读取；30 秒加 0–9 秒随机偏移后过期（DB0） |
 | `publish_id:{id}` | Set | 发布视频集合（DB0） |
 | `favorite_count_dirty_video_ids` | Set | video.rpc 待刷盘计数的视频 ID（DB1） |
 | `favorite_count_event:{eventID}` | String | delta 去重标记，7 天加随机偏移过期（DB1） |

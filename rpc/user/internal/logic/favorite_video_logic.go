@@ -44,7 +44,7 @@ func (l *FavoriteVideoLogic) FavoriteVideo(in *user.FavoriteVideoRequest) (*user
 	if err != nil {
 		return nil, err
 	}
-	changed, err := ApplyFavoriteAction(l.ctx, l.svcCtx, eventID, sequence, in.UserID, 0, in.VideoID, in.Cnt)
+	changed, _, err := ApplyFavoriteAction(l.ctx, l.svcCtx, eventID, sequence, in.UserID, 0, in.VideoID, in.Cnt)
 	if err != nil {
 		return nil, err
 	}
@@ -55,12 +55,13 @@ func (l *FavoriteVideoLogic) FavoriteVideo(in *user.FavoriteVideoRequest) (*user
 }
 
 // ApplyFavoriteAction 仅在 user.rpc 内事务化维护关系、用户计数和计数 Outbox。
-func ApplyFavoriteAction(ctx context.Context, svcCtx *svc.ServiceContext, eventID, actionSequence, userID, authorID, videoID uint64, delta int64) (bool, error) {
+func ApplyFavoriteAction(ctx context.Context, svcCtx *svc.ServiceContext, eventID, actionSequence, userID, authorID, videoID uint64, delta int64) (bool, int64, error) {
 	if eventID == 0 || userID == 0 || videoID == 0 || (delta != 1 && delta != -1) {
-		return false, errors.New(constant.BadParaRequest)
+		return false, 0, errors.New(constant.BadParaRequest)
 	}
 	favorite := model.Favorite{UserID: userID, VideoID: videoID}
 	changed := false
+	var favoriteCount int64
 	err := svcCtx.DBList.Mysql.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 动作版本行与 favorite 状态同事务更新，防止多实例消费时旧动作覆盖新动作。
 		actionState := model.FavoriteActionState{UserID: userID, VideoID: videoID}
@@ -78,6 +79,11 @@ func ApplyFavoriteAction(ctx context.Context, svcCtx *svc.ServiceContext, eventI
 			}
 		}
 		if actionSequence <= actionState.LastActionSequence {
+			countState, err := lockFavoriteVideoCountState(tx, videoID)
+			if err != nil {
+				return err
+			}
+			favoriteCount = countState.FavoriteCount
 			return nil
 		}
 		if actionSequence > actionState.LastIssuedSequence {
@@ -130,6 +136,7 @@ func ApplyFavoriteAction(ctx context.Context, svcCtx *svc.ServiceContext, eventI
 			changed = result.RowsAffected == 1
 		}
 		if !changed {
+			favoriteCount = countState.FavoriteCount
 			return nil
 		}
 
@@ -155,6 +162,7 @@ func ApplyFavoriteAction(ctx context.Context, svcCtx *svc.ServiceContext, eventI
 		}).Error; err != nil {
 			return err
 		}
+		favoriteCount = countState.FavoriteCount
 		outbox := model.FavoriteCountOutbox{
 			EventID:       eventID,
 			UserID:        userID,
@@ -167,13 +175,13 @@ func ApplyFavoriteAction(ctx context.Context, svcCtx *svc.ServiceContext, eventI
 		return tx.Create(&outbox).Error
 	})
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	// favorite 与 user 都归 user.rpc；Redis 缓存删除失败不回滚已提交的持久 Outbox。
 	if err := cache.FavoriteAction(userID, authorID); err != nil {
 		zap.L().Warn("清除点赞用户缓存失败", zap.Error(err))
 	}
-	return changed, nil
+	return changed, favoriteCount, nil
 }
 
 func lockFavoriteVideoCountState(tx *gorm.DB, videoID uint64) (model.FavoriteVideoCountState, error) {
